@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Coding Harness</title>
+<style>
+:root {
+  --bg: #f6f5f1; --panel: #ffffff; --panel-2: #f0eee8; --ink: #1d1d1b; --muted: #6b6a64;
+  --line: #e2dfd6; --accent: #c2603a; --accent-soft: #f6e3da; --blue: #3c6ea8; --blue-soft: #e1ebf6;
+  --green: #2f7d4f; --green-soft: #dcefe3; --amber: #a86b12; --amber-soft: #f7ead2;
+  --red: #b3372f; --red-soft: #f7dedb; --code: #faf9f6;
+  --shadow: 0 1px 2px rgba(0,0,0,.05), 0 4px 16px rgba(0,0,0,.04);
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161614; --panel: #1f1f1c; --panel-2: #272723; --ink: #eceae4; --muted: #9a988f;
+    --line: #34332e; --accent: #e07a52; --accent-soft: #3a2a22; --blue: #7aa7dc; --blue-soft: #1f2a38;
+    --green: #5fbf85; --green-soft: #1d3326; --amber: #e0a646; --amber-soft: #3a2f1c;
+    --red: #e7766c; --red-soft: #3c2320; --code: #1a1a18; --shadow: 0 1px 2px rgba(0,0,0,.3);
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif; }
+header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--line);
+  background: var(--panel); position: sticky; top: 0; z-index: 5; }
+.logo { width: 30px; height: 30px; border-radius: 8px; background: var(--accent); display: grid; place-items: center;
+  color: #fff; font-weight: 700; font-family: var(--mono); }
+header h1 { font-size: 16px; margin: 0; }
+header .sub { color: var(--muted); font-size: 12px; }
+.chip { font-size: 12px; padding: 3px 9px; border-radius: 999px; background: var(--panel-2); color: var(--muted);
+  border: 1px solid var(--line); white-space: nowrap; }
+.chip.ok { background: var(--green-soft); color: var(--green); border-color: transparent; }
+.chip.warn { background: var(--amber-soft); color: var(--amber); border-color: transparent; }
+.spacer { flex: 1; }
+.layout { display: grid; grid-template-columns: 320px 1fr; gap: 18px; padding: 18px 20px; max-width: 1400px; margin: 0 auto; }
+@media (max-width: 860px) { .layout { grid-template-columns: 1fr; } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); padding: 16px; }
+.card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 12px; }
+aside { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+select, input, textarea { width: 100%; font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 10px; }
+textarea { min-height: 90px; resize: vertical; font-family: var(--mono); font-size: 12px; }
+button { font: inherit; border: 0; border-radius: 8px; padding: 9px 14px; cursor: pointer; font-weight: 600;
+  background: var(--panel-2); color: var(--ink); transition: transform .12s, background .2s; }
+button:hover { transform: translateY(-1px); }
+button:active { transform: translateY(0); }
+button.primary { background: var(--accent); color: #fff; width: 100%; margin-top: 14px; }
+button.primary:disabled { opacity: .6; cursor: default; transform: none; }
+.err { color: var(--red); font-size: 12px; margin: 8px 0 0; }
+#runs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 52vh; overflow: auto; }
+#runs li { padding: 9px 10px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; transition: background .15s; }
+#runs li:hover { background: var(--panel-2); }
+#runs li.active { background: var(--accent-soft); border-color: var(--accent); }
+#runs .t { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#runs .m { font-size: 11px; color: var(--muted); display: flex; gap: 6px; align-items: center; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; flex: none; }
+.dot.resolved { background: var(--green); } .dot.running { background: var(--blue); animation: blink 1s infinite; }
+.dot.finished_unverified, .dot.budget_exhausted, .dot.time_exhausted { background: var(--amber); }
+.dot.error, .dot.incomplete, .dot.interrupted { background: var(--red); }
+main { min-width: 0; display: flex; flex-direction: column; gap: 18px; }
+.hero { text-align: center; padding: 48px 24px; }
+.hero h2 { font-size: 22px; margin: 0 0 8px; text-transform: none; letter-spacing: 0; color: var(--ink); }
+.hero p { color: var(--muted); max-width: 560px; margin: 0 auto; }
+.runhead { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+.runhead h3 { margin: 0; font-size: 18px; flex: 1; min-width: 200px; }
+.status { font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 999px; text-transform: uppercase; letter-spacing: .04em; }
+.status.resolved { background: var(--green-soft); color: var(--green); }
+.status.running { background: var(--blue-soft); color: var(--blue); }
+.status.replaying { background: var(--accent-soft); color: var(--accent); }
+.status.finished_unverified, .status.budget_exhausted, .status.time_exhausted { background: var(--amber-soft); color: var(--amber); }
+.status.error, .status.incomplete, .status.interrupted { background: var(--red-soft); color: var(--red); }
+.controls { display: flex; gap: 8px; align-items: center; }
+.controls select { width: auto; padding: 6px 8px; }
+/* pipeline */
+.pipeline { display: flex; align-items: center; margin-top: 18px; }
+.stage { display: flex; flex-direction: column; align-items: center; gap: 6px; flex: none; width: 74px; }
+.stage .node { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; font-size: 16px;
+  background: var(--panel-2); border: 2px solid var(--line); transition: all .35s; }
+.stage .lbl { font-size: 11px; color: var(--muted); font-weight: 600; }
+.stage.active .node { border-color: var(--blue); background: var(--blue-soft); animation: pulse 1.4s infinite; }
+.stage.done .node { border-color: var(--green); background: var(--green-soft); }
+.stage.fail .node { border-color: var(--amber); background: var(--amber-soft); }
+.stage.active .lbl { color: var(--blue); } .stage.done .lbl { color: var(--green); }
+.conn { flex: 1; height: 3px; background: var(--line); border-radius: 3px; position: relative; overflow: hidden; margin-bottom: 20px; }
+.conn::after { content: ""; position: absolute; inset: 0; width: 0; background: var(--green); transition: width .5s ease; }
+.conn.done::after { width: 100%; }
+/* stats */
+.stats { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin-top: 16px; }
+@media (max-width: 1100px) { .stats { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 560px) {
+  .stats { grid-template-columns: repeat(2, 1fr); }
+  .stage { width: 40px; } .stage .lbl { display: none; } .stage .node { width: 32px; height: 32px; font-size: 14px; }
+  .conn { margin-bottom: 0; }
+  header .sub, #modelChip { display: none; }
+  .layout { padding: 16px; }
+}
+.stat { background: var(--panel-2); border-radius: 10px; padding: 10px 12px; }
+.stat .v { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.stat .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.stat.bump .v { animation: bump .4s; }
+/* timeline */
+#feed { list-style: none; margin: 0; padding: 0 0 0 18px; position: relative; display: flex; flex-direction: column; gap: 10px; }
+#feed::before { content: ""; position: absolute; left: 6px; top: 6px; bottom: 6px; width: 2px; background: var(--line); }
+.ev { position: relative; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+  animation: slideIn .35s ease both; }
+.ev::before { content: ""; position: absolute; left: -17px; top: 14px; width: 10px; height: 10px; border-radius: 50%;
+  background: var(--panel); border: 2px solid var(--muted); }
+.ev.tool::before { border-color: var(--blue); } .ev.edit::before { border-color: var(--accent); }
+.ev.test::before { border-color: var(--green); } .ev.bad::before { border-color: var(--red); }
+.ev.think { background: transparent; border-style: dashed; color: var(--muted); font-style: italic; }
+.ev.note { background: transparent; border: 0; padding: 2px 12px; color: var(--muted); font-size: 12px; }
+.ev.note::before { width: 6px; height: 6px; left: -15px; top: 9px; }
+.ev .row { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.ev .name { font-family: var(--mono); font-weight: 700; font-size: 13px; }
+.ev .args { font-family: var(--mono); font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.ev .first { font-family: var(--mono); font-size: 12px; margin-top: 4px; }
+.ev .first.ok { color: var(--green); } .ev .first.bad { color: var(--red); }
+.ev .stepno { font-size: 11px; color: var(--muted); margin-left: auto; }
+details { margin-top: 6px; }
+summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+pre { background: var(--code); border: 1px solid var(--line); border-radius: 8px; padding: 10px; overflow: auto;
+  font: 12px/1.45 var(--mono); max-height: 320px; margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; }
+.thinking { display: flex; align-items: center; gap: 10px; color: var(--blue); font-weight: 600; }
+.dots span { display: inline-block; width: 7px; height: 7px; margin-right: 3px; border-radius: 50%; background: var(--blue);
+  animation: bounce 1.2s infinite; }
+.dots span:nth-child(2) { animation-delay: .15s; } .dots span:nth-child(3) { animation-delay: .3s; }
+/* result */
+.result { animation: slideIn .4s ease both; }
+.verdict { padding: 12px 14px; border-radius: 10px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; }
+.verdict.ok { background: var(--green-soft); color: var(--green); } .verdict.no { background: var(--amber-soft); color: var(--amber); }
+.diff { background: var(--code); border: 1px solid var(--line); border-radius: 8px; overflow: auto; font: 12px/1.5 var(--mono); margin-top: 10px; }
+.diff div { padding: 0 10px; white-space: pre; }
+.diff .add { background: var(--green-soft); color: var(--green); } .diff .del { background: var(--red-soft); color: var(--red); }
+.diff .hunk { color: var(--blue); } .diff .meta { color: var(--muted); }
+.hidden { display: none !important; }
+#confetti { position: fixed; inset: 0; pointer-events: none; overflow: hidden; z-index: 20; }
+#confetti i { position: absolute; top: -12px; width: 8px; height: 12px; border-radius: 2px; animation: fall 1.8s ease-in forwards; }
+@keyframes slideIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(60,110,168,.35); } 50% { box-shadow: 0 0 0 8px rgba(60,110,168,0); } }
+@keyframes bounce { 0%,80%,100% { transform: translateY(0); opacity: .4; } 40% { transform: translateY(-5px); opacity: 1; } }
+@keyframes blink { 50% { opacity: .3; } }
+@keyframes bump { 40% { transform: scale(1.15); color: var(--accent); } }
+@keyframes fall { to { transform: translateY(105vh) rotate(540deg); opacity: .2; } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">&gt;_</div>
+  <div><h1>AI Coding Harness</h1><div class="sub">issue in &rarr; verified fix out</div></div>
+  <div class="spacer"></div>
+  <span id="modelChip" class="chip">model: …</span>
+  <span id="keyChip" class="chip">…</span>
+</header>
+
+<div class="layout">
+  <aside>
+    <section class="card">
+      <h2>New run</h2>
+      <label for="task">Task</label>
+      <select id="task"></select>
+      <div id="custom" class="hidden">
+        <label for="repo">Repository (local path or git URL)</label>
+        <input id="repo" placeholder="/Users/you/projects/my-repo">
+        <label for="issue">Issue</label>
+        <textarea id="issue" placeholder="Title: ...&#10;&#10;What is wrong, and what should happen instead."></textarea>
+        <label for="testcmd">Target test command (optional)</label>
+        <input id="testcmd" placeholder="python3 -m pytest tests/test_x.py::test_bug">
+      </div>
+      <button id="startBtn" class="primary">&#9654;&nbsp; Start run</button>
+      <p id="startErr" class="err hidden"></p>
+    </section>
+    <section class="card">
+      <h2>Runs &amp; recordings</h2>
+      <ul id="runs"></ul>
+    </section>
+  </aside>
+
+  <main>
+    <section id="empty" class="card hero">
+      <h2>Watch the agent work</h2>
+      <p>Start a run on a practice task, or pick a previous run to see it again. Each run shows the
+        pipeline, every tool call the model makes, the harness's own test verification, and the final patch.</p>
+    </section>
+
+    <section id="view" class="card hidden">
+      <div class="runhead">
+        <h3 id="runTitle">…</h3>
+        <span id="runStatus" class="status">…</span>
+        <div class="controls">
+          <select id="speed" title="Replay speed">
+            <option value="0.5">0.5×</option><option value="1" selected>1×</option>
+            <option value="2">2×</option><option value="5">5×</option>
+          </select>
+          <button id="replayBtn" title="Replay this run step by step">&#8635; Replay</button>
+          <button id="stopBtn" class="hidden">&#9632; Stop</button>
+        </div>
+      </div>
+      <div class="pipeline" id="pipeline"></div>
+      <div class="stats">
+        <div class="stat" id="s_step"><div class="v">0</div><div class="k">step</div></div>
+        <div class="stat" id="s_tin"><div class="v">0</div><div class="k">tokens in</div></div>
+        <div class="stat" id="s_tout"><div class="v">0</div><div class="k">tokens out</div></div>
+        <div class="stat" id="s_tools"><div class="v">0</div><div class="k">tool calls</div></div>
+        <div class="stat" id="s_edits"><div class="v">0</div><div class="k">edits</div></div>
+        <div class="stat" id="s_tests"><div class="v">0</div><div class="k">test runs</div></div>
+      </div>
+    </section>
+
+    <section id="resultCard" class="card result hidden">
+      <h2>Result</h2>
+      <div id="verdict" class="verdict"></div>
+      <p id="summary"></p>
+      <div id="diff" class="diff"></div>
+    </section>
+
+    <section id="feedCard" class="card hidden">
+      <h2>Timeline</h2>
+      <ol id="feed"></ol>
+    </section>
+  </main>
+</div>
+<div id="confetti"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const STAGES = [["context", "Context", "\u{1F5C2}"], ["explore", "Explore", "\u{1F50D}"], ["edit", "Edit", "✏️"],
+                ["test", "Test", "\u{1F9EA}"], ["verify", "Verify", "\u{1F6E1}"], ["done", "Done", "\u{1F3C1}"]];
+const TOOL_STAGE = { list_dir: "explore", find_files: "explore", search_code: "explore", read_file: "explore",
+  git_diff: "explore", edit_file: "edit", create_file: "edit", revert_file: "edit", run_tests: "test", run_command: "test" };
+const TOOL_ICON = { list_dir: "\u{1F4C2}", find_files: "\u{1F4C4}", search_code: "\u{1F50D}", read_file: "\u{1F4D6}",
+  edit_file: "✏️", create_file: "➕", revert_file: "↩️", run_tests: "\u{1F9EA}",
+  run_command: "\u{1F4BB}", git_diff: "\u{1F4DD}", finish: "\u{1F3C1}" };
+
+let current = null, since = 0, pollTimer = null, replayTimer = null, thinkingEl = null, thinkingStart = 0, thinkTick = null;
+let S = {};
+
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+async function api(path, body) {
+  const r = await fetch(path, body ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {});
+  return r.json();
+}
+
+/* ---------- pipeline + counters ---------- */
+function buildPipeline() {
+  const p = $("pipeline"); p.innerHTML = "";
+  STAGES.forEach(([id, label, icon], i) => {
+    if (i) { const c = el("div", "conn"); c.id = "conn_" + id; p.appendChild(c); }
+    const s = el("div", "stage"); s.id = "st_" + id;
+    s.appendChild(el("div", "node", icon)); s.appendChild(el("div", "lbl", label)); p.appendChild(s);
+  });
+}
+function setStage(id, final) {
+  const idx = STAGES.findIndex((s) => s[0] === id);
+  STAGES.forEach(([sid], i) => {
+    const node = $("st_" + sid); node.classList.remove("active", "done", "fail");
+    if (i < idx) node.classList.add("done");
+    if (i === idx) node.classList.add(final === "ok" ? "done" : final === "fail" ? "fail" : "active");
+    const c = $("conn_" + sid); if (c) c.classList.toggle("done", i <= idx);
+  });
+}
+function resetStats() { S = { step: 0, tin: 0, tout: 0, tools: 0, edits: 0, tests: 0 }; for (const k in S) paint(k); }
+function bump(k, v) { S[k] = v; paint(k, true); }
+function paint(k, anim) {
+  const box = $("s_" + k), v = box.querySelector(".v");
+  const from = parseInt(v.textContent.replace(/,/g, "")) || 0, to = S[k];
+  if (anim && to !== from) { box.classList.remove("bump"); void box.offsetWidth; box.classList.add("bump"); }
+  const t0 = performance.now();
+  const tick = (t) => { const f = Math.min(1, (t - t0) / 400); v.textContent = Math.round(from + (to - from) * f).toLocaleString();
+    if (f < 1) requestAnimationFrame(tick); };
+  requestAnimationFrame(tick);
+}
+
+/* ---------- timeline ---------- */
+function addEv(cls, build) { hideThinking(); const li = el("li", "ev " + cls); build(li); $("feed").appendChild(li);
+  li.scrollIntoView({ block: "nearest", behavior: "smooth" }); return li; }
+function collapsible(parent, title, text) {
+  if (!text) return; const d = el("details"); d.appendChild(el("summary", null, title));
+  d.appendChild(el("pre", null, text)); parent.appendChild(d);
+}
+function showThinking() {
+  hideThinking();
+  thinkingEl = el("li", "ev think");
+  const row = el("div", "thinking"); const dots = el("span", "dots");
+  dots.append(el("span"), el("span"), el("span")); row.append(dots, el("span", "tt", "Model is thinking…"));
+  thinkingEl.appendChild(row); $("feed").appendChild(thinkingEl); thinkingStart = Date.now();
+  thinkTick = setInterval(() => { if (thinkingEl) thinkingEl.querySelector(".tt").textContent =
+    "Model is thinking… " + Math.round((Date.now() - thinkingStart) / 1000) + "s"; }, 500);
+}
+function hideThinking() { if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; } clearInterval(thinkTick); }
+
+function argSummary(a) {
+  return Object.entries(a || {}).map(([k, v]) => { let s = typeof v === "string" ? v : JSON.stringify(v);
+    s = s.replace(/\n/g, "↵"); return k + "=" + (s.length > 60 ? s.slice(0, 57) + "…" : s); }).join("  ");
+}
+function titleOf(issue) {
+  for (let l of (issue || "").split("\n")) { l = l.replace(/^#+/, "").trim(); if (l) return l.replace(/^title:\s*/i, "").slice(0, 110); }
+  return "(no issue text)";
+}
+function setStatus(txt, cls) { const s = $("runStatus"); s.textContent = txt.replace(/_/g, " "); s.className = "status " + cls; }
+
+function render(e, live) {
+  switch (e.kind) {
+    case "start":
+      $("runTitle").textContent = titleOf(e.issue); $("modelChip").textContent = "model: " + e.model;
+      setStage("context");
+      addEv("note", (li) => { li.textContent = "Task received" + (e.target_test ? " · target test: " + e.target_test : ""); });
+      break;
+    case "overview":
+      addEv("tool", (li) => { const r = el("div", "row"); r.append(el("span", "name", "\u{1F5C2} Repository context gathered"));
+        li.appendChild(r); li.appendChild(el("div", "first ok", "layout, test command, issue keywords, baseline tests (no model calls)"));
+        collapsible(li, "show context given to the model", e.text); });
+      break;
+    case "step":
+      bump("step", e.step); if (live) showThinking(); break;
+    case "model": {
+      const u = e.usage || [0, 0]; bump("tin", S.tin + (u[0] || 0)); bump("tout", S.tout + (u[1] || 0));
+      if (e.text) addEv("think", (li) => { li.textContent = "\u{1F4AD} " + (e.text.length > 400 ? e.text.slice(0, 400) + "…" : e.text); });
+      else hideThinking();
+      if ((e.tool_calls || []).some((t) => t.name === "finish")) {
+        const f = e.tool_calls.find((t) => t.name === "finish");
+        addEv("tool", (li) => { const r = el("div", "row"); r.append(el("span", "name", "\u{1F3C1} finish"));
+          li.appendChild(r); li.appendChild(el("div", "first", ((f.args && f.args.summary) || "").slice(0, 300))); });
+      }
+      break; }
+    case "tool": {
+      const out = e.output || ""; const first = out.split("\n")[0];
+      const bad = /^Error|^TESTS FAILED/.test(out);
+      const stage = TOOL_STAGE[e.name] || "explore"; setStage(stage);
+      bump("tools", S.tools + 1);
+      if ((e.name === "edit_file" || e.name === "create_file") && !bad) bump("edits", S.edits + 1);
+      if (e.name === "run_tests") bump("tests", S.tests + 1);
+      addEv((bad ? "bad " : "") + (stage === "edit" ? "edit" : stage === "test" ? "test" : "tool"), (li) => {
+        const r = el("div", "row"); r.append(el("span", "name", (TOOL_ICON[e.name] || "⚙️") + " " + e.name),
+          el("span", "stepno", S.step ? "step " + S.step : ""));
+        li.appendChild(r); li.appendChild(el("div", "args", argSummary(e.args)));
+        li.appendChild(el("div", "first " + (bad ? "bad" : "ok"), first.slice(0, 160)));
+        collapsible(li, "full output", out.split("\n[harness]")[0]);
+      });
+      break; }
+    case "compact":
+      addEv("note", (li) => { li.textContent = "♻ context compacted: " + e.count + " old output(s) shortened to save tokens"; }); break;
+    case "verify":
+      setStage("verify", null);
+      addEv(e.ok ? "test" : "bad", (li) => { const r = el("div", "row");
+        r.append(el("span", "name", (e.ok ? "\u{1F6E1} Harness verification passed" : "\u{1F6E1} Harness verification rejected the fix")));
+        li.appendChild(r); li.appendChild(el("pre", null, e.detail || e.reason || "")); });
+      break;
+    case "end":
+      hideThinking(); showResult(e, live); break;
+  }
+}
+
+function showResult(e, celebrate) {
+  const ok = e.status === "resolved";
+  setStage("done", ok ? "ok" : "fail"); setStatus(e.status, e.status);
+  bump("tin", Math.max(S.tin, e.input_tokens || 0)); bump("tout", Math.max(S.tout, e.output_tokens || 0));
+  const v = $("verdict"); v.className = "verdict " + (e.verified ? "ok" : "no");
+  v.textContent = e.verification || "Not verified: no test command was available.";
+  $("summary").textContent = e.summary ? "Agent summary: " + e.summary : "";
+  const d = $("diff"); d.innerHTML = "";
+  (e.diff || "(no changes)").split("\n").forEach((line) => {
+    const cls = line.startsWith("+++") || line.startsWith("---") ? "meta" : line.startsWith("@@") ? "hunk"
+      : line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : "";
+    d.appendChild(el("div", cls, line || " "));
+  });
+  $("resultCard").classList.remove("hidden");
+  if (ok && celebrate) confetti();
+}
+function confetti() {
+  const box = $("confetti"), colors = ["#c2603a", "#2f7d4f", "#3c6ea8", "#e0a646", "#9a5fb4"];
+  for (let i = 0; i < 70; i++) { const c = el("i"); c.style.left = Math.random() * 100 + "vw";
+    c.style.background = colors[i % colors.length]; c.style.animationDelay = Math.random() * 0.5 + "s";
+    c.style.transform = "rotate(" + Math.random() * 360 + "deg)"; box.appendChild(c); }
+  setTimeout(() => (box.innerHTML = ""), 2600);
+}
+
+/* ---------- opening, live polling, replay ---------- */
+function resetView() {
+  clearInterval(pollTimer); clearTimeout(replayTimer); hideThinking();
+  $("empty").classList.add("hidden"); $("view").classList.remove("hidden"); $("feedCard").classList.remove("hidden");
+  $("resultCard").classList.add("hidden"); $("feed").innerHTML = ""; buildPipeline(); resetStats(); since = 0;
+}
+async function openRun(id) {
+  current = id; resetView(); highlight();
+  const r = await api("/api/events?run=" + encodeURIComponent(id) + "&since=0");
+  r.events.forEach((e) => render(e, false)); since = r.next;
+  const hasEnd = r.events.some((e) => e.kind === "end");
+  $("stopBtn").classList.toggle("hidden", !r.alive);
+  if (r.alive) { setStatus("running", "running"); if (!hasEnd) showThinking(); poll(); }
+  else if (!hasEnd) setStatus("incomplete", "incomplete");
+  if (!r.events.length && r.console) addEv("note", (li) => { li.textContent = r.console.slice(-400); });
+}
+function poll() {
+  pollTimer = setInterval(async () => {
+    if (!current) return;
+    const id = current, r = await api("/api/events?run=" + encodeURIComponent(id) + "&since=" + since);
+    if (id !== current) return;
+    r.events.forEach((e) => render(e, true)); since = r.next;
+    if (r.done) { clearInterval(pollTimer); $("stopBtn").classList.add("hidden"); hideThinking();
+      if (!r.events.some((e) => e.kind === "end") && $("runStatus").textContent === "running") setStatus("stopped", "incomplete");
+      loadRuns(); }
+  }, 1000);
+}
+async function replay() {
+  if (!current) return;
+  const id = current; resetView();
+  const r = await api("/api/events?run=" + encodeURIComponent(id) + "&since=0");
+  setStatus("replaying", "replaying");
+  const delay = { start: 400, overview: 900, step: 250, model: 1100, tool: 900, compact: 500, verify: 1400, end: 300 };
+  let i = 0;
+  const next = () => {
+    if (id !== current || i >= r.events.length) return;
+    const e = r.events[i++]; render(e, true);
+    const sp = parseFloat($("speed").value) || 1;
+    replayTimer = setTimeout(next, (delay[e.kind] || 400) / sp);
+  };
+  next();
+}
+
+/* ---------- sidebar ---------- */
+async function loadRuns() {
+  const runs = await api("/api/runs"); const ul = $("runs"); ul.innerHTML = "";
+  if (!runs.length) ul.appendChild(el("li", "m", "No runs yet - start one above."));
+  runs.forEach((r) => {
+    const li = el("li"); li.dataset.id = r.id;
+    li.appendChild(el("div", "t", r.title));
+    const m = el("div", "m"); m.append(el("span", "dot " + r.status),
+      el("span", null, (r.recording ? "recording" : new Date(r.started * 1000).toLocaleTimeString()) + " · " + r.status.replace(/_/g, " ") + " · " + r.steps + " steps"));
+    li.appendChild(m); li.onclick = () => openRun(r.id); ul.appendChild(li);
+  });
+  highlight();
+}
+function highlight() { document.querySelectorAll("#runs li").forEach((li) => li.classList.toggle("active", li.dataset.id === current)); }
+async function loadTasks() {
+  const tasks = await api("/api/tasks"); const s = $("task"); s.innerHTML = "";
+  tasks.forEach((t) => { const o = el("option", null, t.label); o.value = t.name; s.appendChild(o); });
+  const o = el("option", null, "Custom repository…"); o.value = "custom"; s.appendChild(o);
+}
+async function loadInfo() {
+  const i = await api("/api/info");
+  $("keyChip").textContent = i.key_set ? "API key set" : "AI_API_KEY not set";
+  $("keyChip").className = "chip " + (i.key_set ? "ok" : "warn");
+  if (i.model) $("modelChip").textContent = "model: " + i.model;
+}
+$("task").onchange = () => $("custom").classList.toggle("hidden", $("task").value !== "custom");
+$("startBtn").onclick = async () => {
+  const b = $("startBtn"), err = $("startErr"); err.classList.add("hidden"); b.disabled = true;
+  const body = { task: $("task").value, repo: $("repo").value, issue: $("issue").value, test_cmd: $("testcmd").value };
+  const r = await api("/api/start", body); b.disabled = false;
+  if (r.error) { err.textContent = r.error; err.classList.remove("hidden"); return; }
+  await loadRuns(); openRun(r.id);
+};
+$("replayBtn").onclick = replay;
+$("stopBtn").onclick = () => current && api("/api/stop", { run: current });
+
+loadInfo(); loadTasks(); loadRuns(); setInterval(loadRuns, 5000);
+</script>
+</body>
+</html>

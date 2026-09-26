@@ -78,6 +78,8 @@ class Agent:
     def run(self, issue: str) -> RunResult:
         t0 = self.t_start = time.time()
         self.ui.header(self.cfg, self.ws.root)
+        self.log("start", issue=issue, repo=self.ws.root, model=self.cfg.model, provider=self.cfg.provider,
+                 max_steps=self.cfg.max_steps, target_test=self.ws.target_test_command or "")
         self.ui.phase("Gathering repository context")
         overview = C.build_overview(self.ws, issue, run_baseline=self.run_baseline)
         self.log("overview", text=overview)
@@ -111,6 +113,9 @@ class Agent:
         r.test_output = self.ws.last_test_output
         r.telemetry = self.telemetry
         self._write_artifacts(issue)
+        self.log("end", status=r.status, verified=r.verified, verification=r.verification, summary=r.summary,
+                 steps=r.steps, input_tokens=r.input_tokens, output_tokens=r.output_tokens,
+                 seconds=round(r.seconds, 1), diff=r.diff, changed_files=r.changed_files)
         self._traj.close()
         self.ui.final(r)
         return r
@@ -145,9 +150,11 @@ class Agent:
                 self.log("compact", count=n, chars=after)
 
             self.ui.step(step, cfg.max_steps, self.result.input_tokens, self.result.output_tokens)
+            self.log("step", step=step, input_tokens=self.result.input_tokens, output_tokens=self.result.output_tokens)
             tm = time.time()
             wasted0 = getattr(self.llm, "wasted_tokens", 0)
-            resp: LLMResponse = self.llm.chat(P.SYSTEM_PROMPT, self.messages, T.TOOL_SPECS)
+            with self.ui.waiting("model thinking"):
+                resp: LLMResponse = self.llm.chat(P.SYSTEM_PROMPT, self.messages, T.TOOL_SPECS)
             self.result.input_tokens += getattr(self.llm, "wasted_tokens", 0) - wasted0  # count retried calls too
             tel = self.telemetry
             tel["model_calls"] += 1

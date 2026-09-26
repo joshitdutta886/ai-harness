@@ -179,7 +179,8 @@ def main(argv=None) -> int:
     repo = resolve_repo(args.repo, issue_raw, ui) or os.getcwd()
 
     from .agent import Agent
-    result = Agent(cfg, repo, ui=ui, run_baseline=not args.no_baseline, test_cmd=args.test_cmd).run(issue)
+    result = Agent(cfg, repo, ui=ui, run_baseline=not args.no_baseline, test_cmd=args.test_cmd,
+                   run_dir=os.environ.get("HARNESS_RUN_DIR") or None).run(issue)
     return 0 if result.status in ("resolved", "finished_unverified") else 1
 
 

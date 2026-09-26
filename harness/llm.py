@@ -281,6 +281,8 @@ class LLMClient:
             body["max_tokens"] = self.cfg.max_output_tokens
         if self._send_temperature:
             body["temperature"] = self.cfg.temperature
+        if self.no_think and self.cfg.provider == "ollama":
+            body["think"] = False          # Ollama's switch for hybrid reasoning models
         headers = {"content-type": "application/json", "authorization": "Bearer " + self.cfg.api_key}
         data = _post(self.cfg.base_url + "/chat/completions", headers, body, self.cfg.request_timeout)
         choices = data.get("choices") or []

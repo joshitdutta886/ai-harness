@@ -1,7 +1,10 @@
 """Terminal output. Plain ANSI, no dependencies. Respects NO_COLOR and non-TTY."""
+import itertools
 import json
 import os
 import sys
+import threading
+import time
 
 
 def _color_enabled() -> bool:
@@ -19,6 +22,37 @@ class UI:
     def p(self, text: str = "") -> None:
         if not self.quiet:
             print(text, flush=True)
+
+    def waiting(self, label: str = "model thinking"):
+        """Context manager: animated spinner + elapsed seconds (only on a real terminal)."""
+        ui = self
+
+        class _Spin:
+            def __enter__(self):
+                self.stop = threading.Event()
+                self.t = None
+                if ui.quiet or not ui.c:
+                    return self
+                def run():
+                    t0 = time.time()
+                    for ch in itertools.cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"):
+                        if self.stop.wait(0.1):
+                            break
+                        sys.stdout.write("\r   \033[36m%s\033[0m \033[2m%s... %.0fs\033[0m " % (ch, label, time.time() - t0))
+                        sys.stdout.flush()
+                    sys.stdout.write("\r\033[K")
+                    sys.stdout.flush()
+                self.t = threading.Thread(target=run, daemon=True)
+                self.t.start()
+                return self
+
+            def __exit__(self, *exc):
+                self.stop.set()
+                if self.t:
+                    self.t.join(timeout=1)
+                return False
+
+        return _Spin()
 
     def banner(self) -> None:
         self.p(self._s("1;36", "=" * 64))

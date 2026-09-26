@@ -42,6 +42,41 @@ runs the bundled demo.
 Requirements: Python 3.8+ and git. The harness itself uses **only the Python standard library**,
 so `make setup` has nothing that can fail to install.
 
+## Design decisions
+
+**One agent, with a supervisor that does not use AI.** The harness runs a single tool-calling
+agent. The work a planner or reviewer agent would do is handled by plain code around it.
+Three reasons:
+
+- **Context.** One agent keeps the whole task in view. Handing work between agents loses detail, and open models like DeepSeek and Qwen are especially sensitive to that.
+- **Tokens.** Every extra agent re-reads the same context, and efficiency is scored.
+- **Checking.** The job of a "reviewer" is done by the test results, compared against a run from before the change. Another model can be talked into approving a bad fix; a failing test cannot.
+
+**The harness does the cheap work, the model does the thinking.** Anything that doesn't
+need judgement is done by code, before or around the model:
+
+- reading the repo tree and finding where the issue's names appear in the code
+- running the baseline tests
+- detecting the test command
+- verifying the result
+
+This saves steps and tokens, and it means these steps work the same way every time.
+
+**Every failure becomes the model's next input.** Nothing in the loop raises an exception
+at the model. A failed edit, a missing file, a syntax error or a rejected finish all come
+back as plain text that says what went wrong and what to try next. That is how the agent
+recovers without human help.
+
+**Built for the evaluation models, not for one API.** DeepSeek and Qwen differ in API
+details: model names, tool-call format, and "thinking" output. The harness adapts to each
+of these at run time rather than assuming one, so the evaluator only has to set
+`AI_API_KEY`.
+
+**Honest reporting.** A run is only called `RESOLVED` when the harness itself has seen the
+target test pass and no new test failures. Everything else is reported as it is:
+`FINISHED_UNVERIFIED`, `BUDGET_EXHAUSTED` or `TIME_EXHAUSTED`. Each report includes the
+verification result and full telemetry.
+
 ## Model configuration
 
 The API key is read **only** from the `AI_API_KEY` environment variable. It is never written to
@@ -79,6 +114,8 @@ Examples:
 
 ```bash
 AI_API_KEY=ollama make run                        # free local Qwen via Ollama (ollama pull qwen3:8b)
+                                                  # start Ollama with OLLAMA_CONTEXT_LENGTH=16384 ollama serve:
+                                                  # its default 4k context is too small for the first prompt
 AI_PROVIDER=deepseek make run                     # model picked from the key's /models list
 AI_PROVIDER=qwen     AI_MODEL=qwen3-coder-plus make run
 AI_PROVIDER=custom   AI_BASE_URL=http://localhost:8000/v1 AI_MODEL=Qwen2.5-Coder-32B make run
@@ -160,6 +197,19 @@ The harness never takes the model's word that a fix works.
 - Commands run non-interactively with timeouts.
 - `AI_API_KEY` is stripped from the environment of every command the agent runs.
 
+## Web UI (optional): `make ui`
+
+`make ui` opens a local dashboard at http://localhost:8787 (bound to 127.0.0.1 only). It
+adds nothing to `make run`, which stays the evaluation entry point. The dashboard shows:
+
+- **Live runs.** A pipeline (Context → Explore → Edit → Test → Verify → Done) lights up as the agent works, each tool call slides into a timeline with its result, token and tool counters count up, and a "thinking" indicator shows while the model is working.
+- **Replay** of any finished run at 0.5–5× speed, including the runs made from the terminal. `examples/recordings/` has a scripted recording, so the UI can be shown with no model at all.
+- **Results:** the harness verification (target test and regression check), the agent's summary and a colour-coded diff.
+- **Start runs** on the demo, a practice task, or any local repo with your own issue and target test.
+
+It reads the same `runs/*/trajectory.jsonl` files the harness always writes, and it uses
+only the Python standard library.
+
 ## Telemetry and reporting
 
 Each run writes to `runs/<timestamp>/`:
@@ -200,7 +250,7 @@ reproduces. `make test` runs this check too.
 ## Project layout
 
 ```
-Makefile              setup / run / test / clean (+ demo, check, report, eval)
+Makefile              setup / run / test / clean (+ demo, check, report, eval, ui)
 config/harness.json   model + budget configuration (no secrets)
 harness/
   cli.py              entry point, interactive prompts, GitHub issue fetch, repo clone
@@ -210,6 +260,7 @@ harness/
   verify.py           target check + regression check against the baseline run
   eval.py             runs the practice task set and prints a score table
   report.py           aggregates all runs (make report)
+  web.py, web/        optional local dashboard (make ui): live view, replay, start runs
   context.py          repo overview, issue keyword search, context compaction
   tools.py            the tools and their JSON schemas
   prompts.py          system prompt and harness messages
