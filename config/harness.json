@@ -1,0 +1,14 @@
+{
+  "_comment": "Model settings. The API key is NEVER stored here - it is read from the AI_API_KEY environment variable. Any value here can be overridden with env vars: AI_PROVIDER, AI_MODEL, AI_BASE_URL, AI_TOOL_MODE, HARNESS_MAX_STEPS.",
+  "provider": "auto",
+  "model": "",
+  "base_url": "",
+  "tool_mode": "auto",
+  "temperature": 0.0,
+  "max_output_tokens": 4096,
+  "max_steps": 40,
+  "max_total_tokens": 800000,
+  "context_char_budget": 100000,
+  "keep_recent_tool_results": 6,
+  "command_timeout": 180
+}
