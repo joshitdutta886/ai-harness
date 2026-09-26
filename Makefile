@@ -14,7 +14,7 @@ PY    := $(shell if [ -x $(VENV)/bin/python ]; then echo $(VENV)/bin/python; els
 export PATH := $(CURDIR)/$(VENV)/bin:$(PATH)
 export PYTHONUNBUFFERED := 1
 
-.PHONY: setup run test clean demo check eval help
+.PHONY: setup run test clean demo check report help
 
 help:
 	@grep -E "^#" Makefile | head -12
@@ -38,6 +38,9 @@ run:
 demo:
 	@rm -rf runs/demo_repo && cp -r examples/sample_repo runs/demo_repo
 	@$(PY) -m harness --repo runs/demo_repo --issue-file examples/sample_issue.md
+
+report:
+	@$(PY) -m harness.report
 
 check:
 	@$(PY) -m harness --check

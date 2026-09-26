@@ -74,6 +74,11 @@ class UI:
         self.p(self._s(colors.get(r.status, "1;31"), "  STATUS: %s" % r.status.upper()))
         self.p("  steps: %d   tokens: %d in / %d out   time: %.0fs" % (r.steps, r.input_tokens, r.output_tokens, r.seconds))
         self.p("  changed files: %s" % (", ".join(r.changed_files) or "none"))
+        tel = getattr(r, "telemetry", None)
+        if tel:
+            self.p("  tool calls: %d (%d errors)   edits: %d   test runs: %d (%d passed)   finish rejections: %d" % (
+                tel["tool_calls"], tel["tool_errors"], tel["edits"], tel["test_runs"], tel["test_passes"],
+                len(tel["finish_rejections"])))
         if r.summary:
             self.p("\n" + self._s("1", "Summary:"))
             self.p(r.summary.strip())

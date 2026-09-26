@@ -52,6 +52,14 @@ class AgentLoopTests(unittest.TestCase):
         # the rejection message reached the model
         flat = json.dumps(llm.seen[-1])
         self.assertIn("finish rejected", flat)
+        tel = r.telemetry
+        self.assertEqual(tel["finish_rejections"], ["tests_not_run"])
+        self.assertEqual(tel["edits"], 1)
+        self.assertEqual(tel["test_passes"], 1)
+        self.assertEqual(tel["tools"]["search_code"]["calls"], 1)
+        import os
+        self.assertTrue(os.path.exists(os.path.join(r.run_dir, "telemetry.json")))
+        self.assertIn("## Telemetry", open(os.path.join(r.run_dir, "report.md")).read())
 
     def test_overview_contains_issue_identifiers(self):
         agent, llm = self.make([FIX, ("run_tests", {}), ("finish", {"summary": "ok"})])

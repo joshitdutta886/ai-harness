@@ -26,6 +26,7 @@ make run ISSUE=https://github.com/owner/repo/issues/42     # repo is cloned auto
 cat issue.md | make run REPO=/path/to/repo
 make demo                                                   # bundled buggy repo
 make check                                                  # test the API key / model connection
+make report                                                 # table of all runs: status, tokens, steps, errors
 ```
 
 `make run` with no arguments starts the interactive prompt. Pressing Enter at both prompts
@@ -130,14 +131,27 @@ the harness has seen the tests pass after the final edit; otherwise it is report
 - Commands run non-interactively with timeouts.
 - `AI_API_KEY` is stripped from the environment of every command the agent runs.
 
-## Output
+## Telemetry and reporting
 
 Each run writes to `runs/<timestamp>/`:
 
-- `report.md`: status, model, steps, tokens, time, the agent's summary, test evidence and the patch
+- `report.md`: human-readable report with status, model, steps, tokens, time, a telemetry table, the agent's summary, test evidence and the patch
+- `telemetry.json`: counters for the run, covering:
+  - model calls and time spent waiting on the model
+  - tokens per step
+  - tool calls, errors and time, per tool
+  - edits, and test runs vs passes
+  - finish rejections and why each happened
+  - context compactions and characters saved
+  - recovery nudges (no-tool, repeat, error-streak)
+  - tool calls recovered from text output
 - `patch.diff`: unified diff of all changes
-- `summary.json`: machine-readable results
-- `trajectory.jsonl`: every model turn and tool call, for debugging and evaluation
+- `summary.json`: machine-readable results, with the telemetry included
+- `trajectory.jsonl`: every model turn, tool call, compaction and verification, with timestamps
+
+`make report` gathers every run into one table (status, model, steps, tokens, time, tool
+errors, finish rejections) and prints the resolve rate and average tokens/steps. Use it
+to compare prompt or tool changes across the same set of issues.
 
 ## Project layout
 
