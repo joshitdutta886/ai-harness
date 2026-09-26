@@ -183,11 +183,12 @@ class LLMClient:
             "max_tokens": self.cfg.max_output_tokens,
             "system": system,
             "messages": out,
-            "tools": [
+        }
+        if tools:
+            body["tools"] = [
                 {"name": t["name"], "description": t["description"], "input_schema": t["parameters"]}
                 for t in tools
-            ],
-        }
+            ]
         if self._send_temperature:
             body["temperature"] = self.cfg.temperature
         headers = {
@@ -252,7 +253,7 @@ class LLMClient:
                     out.append({"role": "tool", "tool_call_id": m["tool_call_id"], "content": m["content"] or "(empty)"})
 
         body = {"model": self.cfg.model, "messages": out}
-        if not text_mode:
+        if not text_mode and tools:
             body["tools"] = [{"type": "function", "function": t} for t in tools]
             body["tool_choice"] = "auto"
         if self._use_max_completion_tokens:

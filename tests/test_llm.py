@@ -46,6 +46,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(pick_model(avail, ["qwen3-coder-plus"], "x"), "qwen3-coder-plus")
         self.assertEqual(pick_model(avail, ["nope"], "x"), "qwen3-coder-plus")
         self.assertEqual(pick_model(["qwen3:8b", "llama3:8b"], ["qwen3"], "x"), "qwen3:8b")
+        self.assertEqual(pick_model(["qwen3.5:0.8b", "qwen3:8b"], ["qwen3"], "x"), "qwen3:8b")
         self.assertEqual(pick_model(["deepseek-flash", "deepseek-v4-pro"], ["deepseek-v4-pro"], "x"), "deepseek-v4-pro")
 
     def test_ollama_key(self):

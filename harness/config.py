@@ -14,6 +14,7 @@ one that accepts it.
 """
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -71,10 +72,13 @@ def pick_model(available: List[str], preferred: List[str], fallback: str) -> str
     for p in preferred:                      # exact preferred id
         if p in avail:
             return p
+    def size_b(m: str) -> float:             # "qwen3:8b" -> 8.0, "qwen3.5:0.8b" -> 0.8
+        mm = re.search(r"(\d+(?:\.\d+)?)b\b", m.lower().split(":")[-1])
+        return float(mm.group(1)) if mm else 0.0
     for p in preferred:                      # preferred as a prefix (e.g. ollama "qwen3:8b")
-        for m in chat:
-            if m.startswith(p):
-                return m
+        hits = [m for m in chat if m.startswith(p)]
+        if hits:
+            return sorted(hits, key=size_b, reverse=True)[0]
     def score(m: str) -> int:
         l = m.lower()
         s = 0
