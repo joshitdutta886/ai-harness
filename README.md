@@ -53,6 +53,13 @@ by an environment variable:
 | step budget | `HARNESS_MAX_STEPS` | 40 |
 | token budget | `HARNESS_MAX_TOKENS` | 800,000 |
 
+**Model auto-selection.** Model names change often (DeepSeek and Qwen both release new
+versions regularly), so the harness does not rely on a hard-coded name. When `AI_MODEL` is
+not set, it reads the provider's `/models` list for the given key and picks the best chat
+model: preferred coding models first, and never embedding, vision or audio models. If the
+API later says a configured model does not exist, the client switches to an available one
+and carries on.
+
 **Provider auto-detection.** DeepSeek and Qwen (DashScope) keys both start with `sk-`, so in `auto`
 mode the harness sends the key to each provider's `/models` endpoint and uses the first one that
 accepts it. It then picks the best available coding model from a preference list. OpenRouter
@@ -62,6 +69,7 @@ server (vLLM, Ollama, a hackathon gateway) with `AI_PROVIDER=custom AI_BASE_URL=
 Examples:
 
 ```bash
+AI_API_KEY=ollama make run                        # free local Qwen via Ollama (ollama pull qwen3:8b)
 AI_PROVIDER=deepseek AI_MODEL=deepseek-chat make run
 AI_PROVIDER=qwen     AI_MODEL=qwen3-coder-plus make run
 AI_PROVIDER=custom   AI_BASE_URL=http://localhost:8000/v1 AI_MODEL=Qwen2.5-Coder-32B make run

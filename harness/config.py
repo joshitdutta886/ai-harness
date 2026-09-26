@@ -23,31 +23,67 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(ROOT, "config", "harness.json")
 
 # provider -> (base url, default model, preferred models in order)
+# Model names change often, so the default is only a fallback: when the key is
+# checked we read the provider's /models list and pick the best match there
+# (see pick_model). The client also switches model automatically if the API
+# says the configured one does not exist.
 PROVIDERS = {
     "deepseek": ("https://api.deepseek.com/v1", "deepseek-chat",
-                 ["deepseek-chat", "deepseek-v3", "deepseek-reasoner"]),
+                 ["deepseek-v4-pro", "deepseek-pro", "deepseek-flash", "deepseek-v4.1-flash",
+                  "deepseek-chat", "deepseek-v3"]),
     "qwen": ("https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "qwen-plus",
-             ["qwen3-coder-plus", "qwen-plus", "qwen-max", "qwen-turbo"]),
+             ["qwen3-coder-plus", "qwen-plus", "qwen-max", "qwen-flash", "qwen-turbo"]),
     "qwen-cn": ("https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-plus",
-                ["qwen3-coder-plus", "qwen-plus", "qwen-max", "qwen-turbo"]),
-    "openrouter": ("https://openrouter.ai/api/v1", "deepseek/deepseek-chat",
-                   ["deepseek/deepseek-chat", "qwen/qwen3-coder", "qwen/qwen-2.5-coder-32b-instruct"]),
+                ["qwen3-coder-plus", "qwen-plus", "qwen-max", "qwen-flash", "qwen-turbo"]),
+    "openrouter": ("https://openrouter.ai/api/v1", "deepseek/deepseek-v4.1-flash",
+                   ["deepseek/deepseek-pro-latest", "deepseek/deepseek-v4.1-flash",
+                    "deepseek/deepseek-flash-latest", "qwen/qwen3.8-flash", "qwen/qwen3-coder"]),
     "siliconflow": ("https://api.siliconflow.cn/v1", "deepseek-ai/DeepSeek-V3",
-                    ["deepseek-ai/DeepSeek-V3", "Qwen/Qwen3-Coder-480B-A35B-Instruct", "Qwen/Qwen2.5-Coder-32B-Instruct"]),
+                    ["deepseek-ai/DeepSeek-V3", "Qwen/Qwen3-Coder-480B-A35B-Instruct"]),
     "together": ("https://api.together.xyz/v1", "deepseek-ai/DeepSeek-V3",
                  ["deepseek-ai/DeepSeek-V3", "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"]),
     "groq": ("https://api.groq.com/openai/v1", "qwen/qwen3-32b", ["qwen/qwen3-32b"]),
+    # Free local models via Ollama (https://ollama.com): AI_API_KEY=ollama
+    "ollama": ("http://localhost:11434/v1", "qwen3:8b",
+               ["qwen3-coder", "qwen2.5-coder", "qwen3", "deepseek"]),
     "openai": ("https://api.openai.com/v1", "gpt-4.1", ["gpt-4.1"]),
     "anthropic": ("https://api.anthropic.com/v1", "claude-sonnet-4-5", ["claude-sonnet-4-5"]),
     "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.5-flash",
                ["gemini-2.5-flash"]),
-    # Any other OpenAI-compatible server (vLLM, Ollama, LM Studio, a hackathon gateway):
-    # set AI_PROVIDER=custom and AI_BASE_URL=... and AI_MODEL=...
+    # Any other OpenAI-compatible server (vLLM, LM Studio, a hackathon gateway):
+    # set AI_PROVIDER=custom and AI_BASE_URL=... (AI_MODEL optional: picked from /models)
     "custom": ("", "", []),
 }
 
 # Order in which "auto" probes a plain "sk-..." key.
-PROBE_ORDER = ["deepseek", "qwen", "qwen-cn", "siliconflow", "openai"]
+PROBE_ORDER = ["deepseek", "qwen", "qwen-cn", "siliconflow", "together", "openai"]
+
+_NOT_CHAT = ("embed", "rerank", "tts", "whisper", "audio", "image", "vision", "-vl", "ocr",
+             "omni", "moderation", "guard", "realtime", "search", "batch", "asr", "wanx")
+
+
+def pick_model(available: List[str], preferred: List[str], fallback: str) -> str:
+    """Choose a chat model from what the API actually offers."""
+    chat = [m for m in available if m and not any(b in m.lower() for b in _NOT_CHAT)]
+    if not chat:
+        return fallback
+    avail = set(chat)
+    for p in preferred:                      # exact preferred id
+        if p in avail:
+            return p
+    for p in preferred:                      # preferred as a prefix (e.g. ollama "qwen3:8b")
+        for m in chat:
+            if m.startswith(p):
+                return m
+    def score(m: str) -> int:
+        l = m.lower()
+        s = 0
+        s += 6 if "coder" in l else 0
+        s += 4 if ("deepseek" in l or "qwen" in l) else 0
+        s += 2 if any(k in l for k in ("pro", "max", "plus", "chat")) else 0
+        s -= 3 if any(k in l for k in ("mini", "tiny", "nano", "0.5b", "1.5b", "3b")) else 0
+        return s
+    return sorted(chat, key=score, reverse=True)[0]
 
 
 def provider_from_key_shape(api_key: str) -> Optional[str]:
@@ -60,6 +96,8 @@ def provider_from_key_shape(api_key: str) -> Optional[str]:
         return "groq"
     if k.startswith("AIza"):
         return "gemini"
+    if k.lower() == "ollama":
+        return "ollama"
     return None
 
 
@@ -107,28 +145,25 @@ class Config:
                         self.provider = cand
                         self.notes.append("Detected provider '%s' from API key." % cand)
                         if not self.model:
-                            self.model = self._pick_model(cand, models)
+                            self.model = pick_model(models, PROVIDERS[cand][2], PROVIDERS[cand][1])
                         break
             if not self.provider:
                 self.provider = "deepseek"
                 self.notes.append("Could not verify key with any provider; defaulting to deepseek.")
         if self.provider not in PROVIDERS:
             raise ValueError("Unknown provider '%s'. Use one of: %s" % (self.provider, ", ".join(PROVIDERS)))
-        base, default_model, _ = PROVIDERS[self.provider]
+        base, default_model, prefs = PROVIDERS[self.provider]
         self.base_url = (self.base_url or base).rstrip("/")
+        if not self.model and probe:
+            models = list_models(self.base_url, self.api_key)
+            if models:
+                self.model = pick_model(models, prefs, default_model)
+                self.notes.append("Picked model '%s' from the %d models this key can use." % (self.model, len(models)))
         self.model = self.model or default_model
         if not self.base_url or not self.model:
             raise ValueError("Provider 'custom' needs AI_BASE_URL and AI_MODEL to be set.")
         return self
 
-    @staticmethod
-    def _pick_model(provider: str, available: List[str]) -> str:
-        prefs = PROVIDERS[provider][2]
-        avail = set(available)
-        for p in prefs:
-            if p in avail:
-                return p
-        return PROVIDERS[provider][1]
 
 
 _ENV_MAP = {

@@ -36,7 +36,7 @@ run:
 	@$(PY) -m harness $(if $(REPO),--repo "$(REPO)") $(if $(ISSUE),--issue "$(ISSUE)") $(if $(ISSUE_FILE),--issue-file "$(ISSUE_FILE)")
 
 demo:
-	@rm -rf runs/demo_repo && cp -r examples/sample_repo runs/demo_repo
+	@mkdir -p runs && rm -rf runs/demo_repo && cp -r examples/sample_repo runs/demo_repo
 	@$(PY) -m harness --repo runs/demo_repo --issue-file examples/sample_issue.md
 
 report:

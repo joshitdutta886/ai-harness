@@ -59,7 +59,8 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(tel["tools"]["search_code"]["calls"], 1)
         import os
         self.assertTrue(os.path.exists(os.path.join(r.run_dir, "telemetry.json")))
-        self.assertIn("## Telemetry", open(os.path.join(r.run_dir, "report.md")).read())
+        with open(os.path.join(r.run_dir, "report.md")) as fh:
+            self.assertIn("## Telemetry", fh.read())
 
     def test_overview_contains_issue_identifiers(self):
         agent, llm = self.make([FIX, ("run_tests", {}), ("finish", {"summary": "ok"})])
@@ -139,6 +140,30 @@ class WireFormatTests(unittest.TestCase):
         self.assertIn("<tool_call>", body["messages"][0]["content"])
         self.assertTrue(all(m["role"] in ("system", "user", "assistant") for m in body["messages"]))
         self.assertEqual(r.tool_calls[0].name, "read_file")
+
+    def test_switches_model_when_missing(self):
+        import io
+        import urllib.error
+        from harness import config as CF
+        calls = []
+
+        def fake(url, headers, body, timeout):
+            calls.append(body["model"])
+            if body["model"] == "old-model":
+                raise urllib.error.HTTPError(url, 400, "bad", {}, io.BytesIO(
+                    b'{"error": {"message": "Model Not Exist"}}'))
+            return {"choices": [{"message": {"content": "hi"}}], "usage": {}}
+        L._post = fake
+        orig = CF.list_models
+        CF.list_models = lambda base, key, timeout=12: ["text-embedding", "deepseek-v4-pro"]
+        try:
+            cfg = fake_config(tempfile.mkdtemp())
+            cfg.model = "old-model"
+            r = L.LLMClient(cfg).chat("sys", [{"role": "user", "content": "x"}], [])
+        finally:
+            CF.list_models = orig
+        self.assertEqual(calls, ["old-model", "deepseek-v4-pro"])
+        self.assertEqual(r.text, "hi")
 
     def test_anthropic_merges_tool_results(self):
         def fake(url, headers, body, timeout):

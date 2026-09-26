@@ -40,6 +40,17 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("dashscope", c.base_url)
         self.assertEqual(c.model, "qwen-plus")
 
+    def test_pick_model_prefers_coding_chat_models(self):
+        from harness.config import pick_model
+        avail = ["text-embedding-v3", "qwen-vl-max", "qwen3-coder-plus", "qwen-turbo"]
+        self.assertEqual(pick_model(avail, ["qwen3-coder-plus"], "x"), "qwen3-coder-plus")
+        self.assertEqual(pick_model(avail, ["nope"], "x"), "qwen3-coder-plus")
+        self.assertEqual(pick_model(["qwen3:8b", "llama3:8b"], ["qwen3"], "x"), "qwen3:8b")
+        self.assertEqual(pick_model(["deepseek-flash", "deepseek-v4-pro"], ["deepseek-v4-pro"], "x"), "deepseek-v4-pro")
+
+    def test_ollama_key(self):
+        self.assertEqual(provider_from_key_shape("ollama"), "ollama")
+
     def test_custom_requires_url(self):
         with self.assertRaises(ValueError):
             Config(api_key="k", provider="custom").resolve(probe=False)

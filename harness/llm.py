@@ -61,6 +61,7 @@ class LLMClient:
         self._use_max_completion_tokens = False
         self._send_temperature = True
         self._send_reasoning = False
+        self._model_switched = False
         mode = (cfg.tool_mode or "auto").lower()
         self.text_mode = mode == "text"
         self._allow_mode_switch = mode == "auto" and not self.is_anthropic
@@ -82,6 +83,8 @@ class LLMClient:
                     pass
                 if e.code == 400 and not self.is_anthropic and self._adapt(detail):
                     continue  # retry immediately with adjusted params
+                if e.code in (400, 404) and self._switch_model(detail):
+                    continue  # configured model does not exist here; use one that does
                 if e.code in RETRY_STATUS and attempt < 6:
                     self._sleep(attempt, e)
                     continue
@@ -93,6 +96,26 @@ class LLMClient:
                 raise LLMError("Network error talking to %s: %s" % (self.cfg.provider, e))
 
     # ----------------------------------------------------------------- helpers
+    def _switch_model(self, detail: str) -> bool:
+        d = detail.lower()
+        if self._model_switched or "model" not in d:
+            return False
+        if not any(k in d for k in ("not exist", "not found", "does not exist", "invalid model",
+                                    "unknown model", "model_not_found", "not supported", "no such model")):
+            return False
+        from .config import PROVIDERS, list_models, pick_model
+        models = list_models(self.cfg.base_url, self.cfg.api_key)
+        if not models:
+            return False
+        prefs = PROVIDERS.get(self.cfg.provider, ("", "", []))[2]
+        new = pick_model([m for m in models if m != self.cfg.model], prefs, "")
+        if not new:
+            return False
+        print("   [harness] model '%s' is not available; switching to '%s'" % (self.cfg.model, new), flush=True)
+        self.cfg.model = new
+        self._model_switched = True
+        return True
+
     @staticmethod
     def _sleep(attempt: int, err: Exception) -> None:
         wait = None
