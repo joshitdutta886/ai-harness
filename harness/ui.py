@@ -72,6 +72,8 @@ class UI:
         self.p(self._s("1;36", "=" * 64))
         colors = {"resolved": "1;32", "finished_unverified": "1;33"}
         self.p(self._s(colors.get(r.status, "1;31"), "  STATUS: %s" % r.status.upper()))
+        if getattr(r, "verification", ""):
+            self.p("  " + r.verification.replace("\n", "\n  "))
         self.p("  steps: %d   tokens: %d in / %d out   time: %.0fs" % (r.steps, r.input_tokens, r.output_tokens, r.seconds))
         self.p("  changed files: %s" % (", ".join(r.changed_files) or "none"))
         tel = getattr(r, "telemetry", None)

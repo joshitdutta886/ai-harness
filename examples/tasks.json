@@ -1,0 +1,22 @@
+[
+  {
+    "name": "cart-discount",
+    "repo": "examples/sample_repo",
+    "issue": "examples/sample_issue.md",
+    "test_cmd": "python3 -c \"from shop.cart import Cart; c = Cart(); c.add('chair', 100, 2); assert c.total(discount_percent=10) == 180, c.total(discount_percent=10)\"",
+    "note": "no failing test in the repo: the target check reproduces the issue's example"
+  },
+  {
+    "name": "slugify",
+    "repo": "examples/tasks/slugify/repo",
+    "issue": "examples/tasks/slugify/issue.md",
+    "test_cmd": "python3 -m unittest tests.test_text.SlugifyTests",
+    "note": "repo has an unrelated test that already fails - checks regression-aware verification"
+  },
+  {
+    "name": "median",
+    "repo": "examples/tasks/median/repo",
+    "issue": "examples/tasks/median/issue.md",
+    "test_cmd": "python3 -m unittest tests.test_stats.MedianTests.test_even_length"
+  }
+]

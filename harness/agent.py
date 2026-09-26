@@ -8,6 +8,7 @@ from typing import List, Optional
 from . import context as C
 from . import prompts as P
 from . import tools as T
+from . import verify as V
 from .config import Config
 from .llm import LLMClient, LLMError, LLMResponse
 from .ui import UI
@@ -29,13 +30,18 @@ class RunResult:
     run_dir: str = ""
     error: str = ""
     telemetry: dict = field(default_factory=dict)
+    verified: Optional[bool] = None
+    verification: str = ""
 
 
 class Agent:
     def __init__(self, cfg: Config, repo: str, llm=None, ui: Optional[UI] = None,
-                 run_baseline: bool = True):
+                 run_baseline: bool = True, test_cmd: Optional[str] = None, run_dir: Optional[str] = None):
         self.cfg = cfg
         self.ws = T.Workspace(repo, command_timeout=cfg.command_timeout)
+        self.ws.target_test_command = (test_cmd or "").strip() or None
+        self.verdict: Optional[V.Verdict] = None
+        self.t_start = time.time()
         self.llm = llm or LLMClient(cfg)
         self.ui = ui or UI()
         self.run_baseline = run_baseline
@@ -54,9 +60,10 @@ class Agent:
             "finish_rejections": [],     # reasons
             "nudges_no_tool": 0, "repeat_warnings": 0, "recovery_hints": 0,
             "text_mode_tool_calls": 0, "edits": 0, "test_runs": 0, "test_passes": 0,
+            "verifications": 0, "reverts": 0,
         }
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        self.run_dir = os.path.join(cfg.runs_dir, stamp)
+        self.run_dir = run_dir or os.path.join(cfg.runs_dir, stamp)
         os.makedirs(self.run_dir, exist_ok=True)
         self.result.run_dir = self.run_dir
         self._traj = open(os.path.join(self.run_dir, "trajectory.jsonl"), "w", encoding="utf-8")
@@ -69,7 +76,7 @@ class Agent:
 
     # ------------------------------------------------------------------- main
     def run(self, issue: str) -> RunResult:
-        t0 = time.time()
+        t0 = self.t_start = time.time()
         self.ui.header(self.cfg, self.ws.root)
         self.ui.phase("Gathering repository context")
         overview = C.build_overview(self.ws, issue, run_baseline=self.run_baseline)
@@ -87,7 +94,15 @@ class Agent:
             self.result.status = "interrupted"
             self.ui.error("Interrupted by user.")
 
+        if self.verdict is None and self.ws.changed_files() and self.result.status not in ("interrupted",):
+            try:
+                self._verify()   # evidence for the report even when the loop ended early
+            except Exception as e:  # never lose the report because of this
+                self.log("verify_error", error=str(e))
         r = self.result
+        if self.verdict is not None:
+            r.verified = self.verdict.ok
+            r.verification = self.verdict.describe()
         r.seconds = time.time() - t0
         r.diff = self.ws.diff()
         r.changed_files = self.ws.changed_files()
@@ -110,8 +125,14 @@ class Agent:
                 self.ui.error("Token budget exhausted (%d)." % used)
                 return
 
+            elapsed_min = (time.time() - self.t_start) / 60.0
+            if cfg.max_minutes and elapsed_min >= cfg.max_minutes:
+                self.result.status = "time_exhausted"
+                self.ui.error("Time limit reached (%.0f min)." % cfg.max_minutes)
+                return
             left = cfg.max_steps - step
-            if left <= max(3, cfg.max_steps // 6) and not self.warned_wrap_up:
+            time_short = cfg.max_minutes and elapsed_min >= 0.8 * cfg.max_minutes
+            if (left <= max(3, cfg.max_steps // 6) or time_short) and not self.warned_wrap_up:
                 self.warned_wrap_up = True
                 self._add_user(P.NUDGE_WRAP_UP.format(left=left))
 
@@ -191,6 +212,8 @@ class Agent:
             tel["tool_errors"] += 1
         if tc.name in ("edit_file", "create_file") and not out.startswith("Error"):
             tel["edits"] += 1
+        if tc.name == "revert_file" and not out.startswith("Error"):
+            tel["reverts"] += 1
         if tc.name == "run_tests":
             tel["test_runs"] += 1
             tel["test_passes"] += int(out.startswith("TESTS PASSED"))
@@ -232,6 +255,20 @@ class Agent:
             self._add_user(text)
 
     # ----------------------------------------------------------------- finish
+    def _verify(self) -> Optional[V.Verdict]:
+        ws = self.ws
+        suite = V.suite_command(ws.detect_test_command())
+        if not suite and not ws.target_test_command:
+            return None
+        self.ui.phase("Harness verification (target test + regression check)")
+        verdict = V.verify(ws, ws.target_test_command, suite, ws.baseline, self.cfg.command_timeout)
+        self.verdict = verdict
+        self.telemetry["verifications"] += 1
+        self.log("verify", ok=verdict.ok, reason=verdict.reason, detail=verdict.describe(),
+                 new_failures=sorted(verdict.new_failures), preexisting=sorted(verdict.preexisting))
+        self.ui.info(verdict.describe().replace("\n", "\n   "))
+        return verdict
+
     def _try_finish(self, summary: str, call_id: Optional[str]) -> bool:
         ws = self.ws
         changed = ws.changed_files()
@@ -246,32 +283,29 @@ class Agent:
 
         if changed and self.finish_rejections < max_rejections:
             tests_fresh = ws.last_test_passed and ws.last_test_edit_counter == ws.edit_counter
-            if not tests_fresh and ws.last_test_command == "" and ws.detect_test_command() is None:
-                tests_fresh = True  # no way to test; accept
-            if not tests_fresh:
+            no_way_to_test = ws.detect_test_command() is None and not ws.target_test_command
+            if not tests_fresh and not no_way_to_test:
                 self.finish_rejections += 1
                 self.ui.info("finish rejected: tests not run after last edit")
                 self.telemetry["finish_rejections"].append("tests_not_run")
                 self._reply_to_finish(call_id, P.FINISH_NO_TESTS)
                 return False
             # Independent verification by the harness ("evidence over claims").
-            cmd = ws.detect_test_command()
-            if cmd:
-                self.ui.phase("Harness verification: " + cmd)
-                verify = T.run_tests(ws, cmd)
-                self.log("verify", command=cmd, output=verify[:4000])
-                if not verify.startswith("TESTS PASSED"):
-                    baseline_failed = ws.baseline_test_output and not ws.baseline_test_output.startswith("exit code: 0")
-                    if not baseline_failed or "unrelated" not in summary.lower():
-                        self.finish_rejections += 1
-                        self.ui.info("finish rejected: harness verification failed")
-                        self.telemetry["finish_rejections"].append("verification_failed")
-                        self._reply_to_finish(call_id, P.FINISH_VERIFY_FAILED.format(
-                            output=T.truncate(verify, 3500)))
-                        return False
+            verdict = self._verify()
+            if verdict is not None and not verdict.ok:
+                self.finish_rejections += 1
+                self.ui.info("finish rejected: harness verification failed")
+                self.telemetry["finish_rejections"].append("verification_failed")
+                failing = verdict.target if (verdict.target and not verdict.target.passed) else verdict.suite
+                detail = T.truncate(failing.output, 3000) if failing else ""
+                self._reply_to_finish(call_id, P.FINISH_VERIFY_FAILED.format(
+                    verdict=verdict.describe(), output=detail))
+                return False
+        elif changed and self.verdict is None:
+            self._verify()   # out of retries: still record the evidence
 
-        verified = bool(changed) and bool(ws.last_test_passed) and ws.last_test_edit_counter == ws.edit_counter
-        self.result.status = "resolved" if verified else "finished_unverified"
+        self.result.status = "resolved" if (changed and self.verdict is not None and self.verdict.ok) \
+            else "finished_unverified"
         self.result.summary = summary
         self._reply_to_finish(call_id, "Finished.")
         return True
@@ -298,13 +332,16 @@ class Agent:
             "- **Steps:** %d / %d" % (r.steps, self.cfg.max_steps),
             "- **Tokens:** %d in / %d out" % (r.input_tokens, r.output_tokens),
             "- **Time:** %.1fs" % r.seconds,
-            "- **Changed files:** %s" % (", ".join(r.changed_files) or "none"), "",
+            "- **Changed files:** %s" % (", ".join(r.changed_files) or "none"),
+            "- **Verified by harness:** %s" % {True: "yes", False: "no", None: "not run"}[r.verified],
+            "- **Target test:** %s" % (self.ws.target_test_command or "none given"), "",
             "## Issue", "", issue.strip(), "",
             "## Telemetry", "",
             "| Metric | Value |", "|---|---|",
             "| Model calls | %d (%.1fs waiting on the model) |" % (self.telemetry["model_calls"], self.telemetry["model_seconds"]),
             "| Tool calls | %d (%d returned an error to the model) |" % (self.telemetry["tool_calls"], self.telemetry["tool_errors"]),
-            "| Edits | %d |" % self.telemetry["edits"],
+            "| Edits | %d (reverts: %d) |" % (self.telemetry["edits"], self.telemetry["reverts"]),
+            "| Harness verifications | %d |" % self.telemetry["verifications"],
             "| Test runs | %d (%d passed) |" % (self.telemetry["test_runs"], self.telemetry["test_passes"]),
             "| Finish rejections | %s |" % (", ".join(self.telemetry["finish_rejections"]) or "none"),
             "| Context compactions | %d (%d chars saved) |" % (self.telemetry["compactions"], self.telemetry["chars_saved_by_compaction"]),
@@ -316,6 +353,8 @@ class Agent:
              for k, v in sorted(self.telemetry["tools"].items())] + [
             "",
             "## Agent summary", "", r.summary or r.error or "(none)", "",
+            "## Harness verification", "",
+            "```", r.verification or "(not run: no test command available)", "```", "",
             "## Test evidence", "",
             "Command: `%s`" % (r.test_command or "n/a"), "",
             "```", T.truncate(r.test_output or "(tests not run)", 4000), "```", "",

@@ -6,6 +6,7 @@
 #
 # Optional variables for make run:
 #   REPO=<path or git URL>   ISSUE=<text | file | GitHub issue URL>   ISSUE_FILE=<file>
+#   TEST_CMD=<test command that must pass once the issue is fixed>
 #   AI_MODEL=<model id>      AI_PROVIDER=<deepseek|qwen|openrouter|custom|...>  AI_BASE_URL=<url>
 
 SHELL := /bin/bash
@@ -13,8 +14,11 @@ VENV  := .venv
 PY    := $(shell if [ -x $(VENV)/bin/python ]; then echo $(VENV)/bin/python; else echo python3; fi)
 export PATH := $(CURDIR)/$(VENV)/bin:$(PATH)
 export PYTHONUNBUFFERED := 1
+# Task inputs reach the harness through the environment, so quotes inside
+# ISSUE or TEST_CMD survive intact (harness/cli.py reads these variables).
+export REPO ISSUE ISSUE_FILE TEST_CMD
 
-.PHONY: setup run test clean demo check report help
+.PHONY: setup run test clean demo check report eval help
 
 help:
 	@grep -E "^#" Makefile | head -12
@@ -33,11 +37,14 @@ setup:
 	@echo "==> Setup complete"
 
 run:
-	@$(PY) -m harness $(if $(REPO),--repo "$(REPO)") $(if $(ISSUE),--issue "$(ISSUE)") $(if $(ISSUE_FILE),--issue-file "$(ISSUE_FILE)")
+	@$(PY) -m harness
 
 demo:
 	@mkdir -p runs && rm -rf runs/demo_repo && cp -r examples/sample_repo runs/demo_repo
 	@$(PY) -m harness --repo runs/demo_repo --issue-file examples/sample_issue.md
+
+eval:
+	@$(PY) -m harness.eval $(if $(TASK),--task "$(TASK)")
 
 report:
 	@$(PY) -m harness.report

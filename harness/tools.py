@@ -57,6 +57,9 @@ class Workspace:
         self.test_command: Optional[str] = None
         self.files_read: set = set()
         self.baseline_test_output: str = ""
+        self.target_test_command: Optional[str] = None   # evaluator-supplied "test case"
+        self.baseline = None                              # verify.Snapshot of the suite before edits
+        self.target_baseline = None                       # verify.Snapshot of the target test before edits
 
     # --------------------------------------------------------------- paths
     def resolve(self, path: str) -> str:
@@ -356,7 +359,7 @@ def run_command(ws: Workspace, command: str, timeout: Optional[int] = None) -> s
 
 
 def run_tests(ws: Workspace, command: str = "", timeout: Optional[int] = None) -> str:
-    cmd = (command or "").strip() or ws.detect_test_command()
+    cmd = (command or "").strip() or ws.target_test_command or ws.detect_test_command()
     if not cmd:
         return ("Error: could not detect how to run tests in this repository. Pass an explicit "
                 "command, e.g. run_tests(command=\"python3 -m pytest tests/test_x.py -q\").")
@@ -370,6 +373,25 @@ def run_tests(ws: Workspace, command: str = "", timeout: Optional[int] = None) -
         ws.last_test_edit_counter = ws.edit_counter
     verdict = "TESTS PASSED" if passed else "TESTS FAILED (or did not run)"
     return "%s\ncommand: %s\n%s" % (verdict, cmd, result)
+
+
+def revert_file(ws: Workspace, path: str) -> str:
+    """Undo every change to one file (restores the original, or deletes a file you created)."""
+    full = ws.resolve(path)
+    rel = ws.rel(full)
+    if rel not in ws.originals:
+        return "Error: you have not changed '%s', so there is nothing to revert." % path
+    original = ws.originals[rel]
+    if original is None:
+        if os.path.exists(full):
+            os.remove(full)
+        msg = "Deleted %s (it did not exist before your changes)." % rel
+    else:
+        with open(full, "w", encoding="utf-8") as f:
+            f.write(original)
+        msg = "Restored %s to its original content." % rel
+    ws.edit_counter += 1
+    return msg
 
 
 def git_diff(ws: Workspace) -> str:
@@ -423,10 +445,15 @@ TOOL_SPECS = [
      "parameters": _schema({"command": {"type": "string"},
                             "timeout": {"type": "integer", "description": "Seconds. Default 180"}}, ["command"])},
     {"name": "run_tests",
-     "description": "Run the test suite (auto-detected) or a specific test command. You MUST run tests "
-                    "successfully after your last edit before calling finish.",
+     "description": "Run tests. With no command it runs the target test for this task if one was given, "
+                    "otherwise the auto-detected suite. Pass an explicit command to run a specific file or "
+                    "the whole suite. You MUST run tests successfully after your last edit before calling finish.",
      "parameters": _schema({"command": {"type": "string", "description": "Optional explicit test command"},
                             "timeout": {"type": "integer"}}, [])},
+    {"name": "revert_file",
+     "description": "Undo all your changes to one file, restoring the original. Use it when an edit "
+                    "went wrong and you want a clean start on that file.",
+     "parameters": _schema({"path": {"type": "string"}}, ["path"])},
     {"name": "git_diff",
      "description": "Show the diff of every change you have made so far. Review it before finishing.",
      "parameters": _schema({}, [])},
@@ -445,6 +472,7 @@ TOOL_FUNCS: Dict[str, Callable] = {
     "create_file": create_file,
     "run_command": run_command,
     "run_tests": run_tests,
+    "revert_file": revert_file,
     "git_diff": git_diff,
 }
 

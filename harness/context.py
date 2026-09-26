@@ -13,6 +13,7 @@ import subprocess
 from typing import List
 
 from . import tools as T
+from . import verify as V
 
 _STOP = {
     "the", "and", "for", "that", "this", "with", "when", "from", "should", "would", "which", "there",
@@ -79,13 +80,29 @@ def build_overview(ws: T.Workspace, issue: str, run_baseline: bool = True, basel
         if hits:
             parts.append("## Where identifiers from the issue appear\n" + "\n".join(hits[:6]))
 
-    if run_baseline and test_cmd:
-        res = T.run_command(ws, test_cmd, timeout=baseline_timeout)
-        # keep the tail: that is where the failure summary lives
-        tail = res if len(res) < 2500 else res[:300] + "\n...\n" + res[-2200:]
-        parts.append("## Baseline test run (before any change)\n```\n%s\n```" % tail)
-        ws.baseline_test_output = res
+    if ws.target_test_command:
+        parts.append("## Target test for this task\n`%s`\nThis test must pass when you are done." % ws.target_test_command)
+    if run_baseline and ws.target_test_command:
+        snap = V.snapshot(ws, ws.target_test_command, baseline_timeout)
+        ws.target_baseline = snap
+        state = "PASSES already" if snap.passed else "FAILS right now - this is the bug to fix"
+        parts.append("## Target test before any change: %s\n```\n%s\n```" % (state, _tail(snap.output)))
+    suite = V.suite_command(test_cmd)
+    if run_baseline and suite:
+        snap = V.snapshot(ws, suite, baseline_timeout)
+        ws.baseline = snap
+        ws.baseline_test_output = snap.output
+        note = ""
+        if snap.failing:
+            note = ("\nAlready failing before your change (%d): %s" %
+                    (len(snap.failing), ", ".join(sorted(snap.failing)[:15])))
+        parts.append("## Baseline test run (before any change)\n```\n%s\n```%s" % (_tail(snap.output), note))
     return "\n\n".join(parts)
+
+
+def _tail(res: str) -> str:
+    # keep the tail: that is where the failure summary lives
+    return res if len(res) < 2500 else res[:300] + "\n...\n" + res[-2200:]
 
 
 def _msg_chars(m: dict) -> int:

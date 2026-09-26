@@ -134,6 +134,7 @@ class Config:
     context_char_budget: int = 100_000   # compaction kicks in above this (~25k tokens)
     keep_recent_tool_results: int = 6    # tool outputs kept in full
     command_timeout: int = 180
+    max_minutes: float = 30.0            # wall-clock limit for one task
     request_timeout: int = 240
     runs_dir: str = field(default_factory=lambda: os.path.join(ROOT, "runs"))
     notes: List[str] = field(default_factory=list)
@@ -181,6 +182,7 @@ _ENV_MAP = {
     "HARNESS_MAX_STEPS": ("max_steps", int),
     "HARNESS_MAX_TOKENS": ("max_total_tokens", int),
     "HARNESS_CMD_TIMEOUT": ("command_timeout", int),
+    "HARNESS_MAX_MINUTES": ("max_minutes", float),
 }
 
 

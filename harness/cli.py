@@ -125,7 +125,12 @@ def interactive_inputs(ui: UI):
         "\nIssue - paste the text, a GitHub issue URL, or a file path.\n"
         "  (finish with two empty lines, a line with END, or Ctrl-D%s)" %
         ("; just press Enter twice for the demo issue" if default_issue else ""))
-    return repo, issue or default_issue
+    test_cmd = ""
+    try:
+        test_cmd = input("\nTest command that should pass once fixed (optional - press Enter to skip)\n> ").strip()
+    except EOFError:
+        pass
+    return repo, issue or default_issue, test_cmd
 
 
 def main(argv=None) -> int:
@@ -133,6 +138,8 @@ def main(argv=None) -> int:
     ap.add_argument("--repo", default=os.environ.get("REPO", ""), help="path or git URL of the target repository")
     ap.add_argument("--issue", default=os.environ.get("ISSUE", ""), help="issue text, file path, or GitHub issue URL")
     ap.add_argument("--issue-file", default=os.environ.get("ISSUE_FILE", ""))
+    ap.add_argument("--test-cmd", default=os.environ.get("TEST_CMD", ""),
+                    help="test command that must pass when the issue is fixed (the evaluator's test case)")
     ap.add_argument("--max-steps", type=int, default=0)
     ap.add_argument("--no-baseline", action="store_true", help="skip the baseline test run")
     ap.add_argument("--demo", action="store_true", help="run on the bundled sample repo")
@@ -161,7 +168,8 @@ def main(argv=None) -> int:
     if not issue_raw and not sys.stdin.isatty():
         issue_raw = sys.stdin.read()
     if not args.repo and not issue_raw and sys.stdin.isatty():
-        args.repo, issue_raw = interactive_inputs(ui)
+        args.repo, issue_raw, typed_test = interactive_inputs(ui)
+        args.test_cmd = args.test_cmd or typed_test
     elif not issue_raw and sys.stdin.isatty():
         issue_raw = read_multiline("Issue - paste text, a GitHub issue URL, or a file path (end with two empty lines):")
 
@@ -171,7 +179,7 @@ def main(argv=None) -> int:
     repo = resolve_repo(args.repo, issue_raw, ui) or os.getcwd()
 
     from .agent import Agent
-    result = Agent(cfg, repo, ui=ui, run_baseline=not args.no_baseline).run(issue)
+    result = Agent(cfg, repo, ui=ui, run_baseline=not args.no_baseline, test_cmd=args.test_cmd).run(issue)
     return 0 if result.status in ("resolved", "finished_unverified") else 1
 
 

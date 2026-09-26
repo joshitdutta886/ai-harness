@@ -10,5 +10,6 @@
   "max_total_tokens": 800000,
   "context_char_budget": 100000,
   "keep_recent_tool_results": 6,
-  "command_timeout": 180
+  "command_timeout": 180,
+  "max_minutes": 30
 }

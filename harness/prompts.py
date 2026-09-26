@@ -13,8 +13,10 @@ so never ask for clarification: decide, act, and verify.
 5. FIX - Make minimal, focused edits with edit_file. Fix the root cause, not the symptom.
    Keep the existing code style. Do not refactor unrelated code. Do not delete or weaken
    existing tests to make them pass. Add or update a test when it helps prove the fix.
-6. VERIFY - Run the tests with run_tests (the relevant test file first, then the wider suite).
-   If anything fails, read the output, fix, and run again.
+6. VERIFY - Run run_tests with no command first (it runs the task's target test when one is
+   given), then the wider suite. If anything fails, read the output, fix, and run again.
+   Tests listed as "already failing before your change" are not your job unless the issue
+   is about them.
 7. REVIEW - Call git_diff and check every change is intended and complete.
 8. FINISH - Call finish with: root cause, what you changed, and the test evidence.
 
@@ -23,7 +25,8 @@ so never ask for clarification: decide, act, and verify.
   files you have already seen unless they changed.
 - You may call several independent tools in one turn (e.g. two searches).
 - edit_file needs old_str copied exactly from the file (without the line-number prefix).
-  If an edit fails, re-read those lines and retry with the exact text.
+  If an edit fails, re-read those lines and retry with the exact text. If a file gets into a
+  bad state, use revert_file to restore it and start that file again.
 - If an approach fails twice, step back and try a different approach.
 - If tests cannot run because a third-party package is missing (ImportError / ModuleNotFoundError
   for something that is not part of this repo), install it with run_command
@@ -70,9 +73,10 @@ FINISH_NO_TESTS = (
 )
 
 FINISH_VERIFY_FAILED = (
-    "[harness] finish rejected: the harness ran the tests itself and they FAILED:\n\n{output}\n\n"
-    "Fix the failure (if these failures existed before your change and are unrelated, say so "
-    "explicitly in your finish summary), then call finish again."
+    "[harness] finish rejected: the harness verified your change itself and it did not pass.\n\n"
+    "{verdict}\n\nOutput:\n{output}\n\n"
+    "Tests that were already failing before your change are ignored; only the target test and "
+    "NEW failures count. Fix the problem, run the tests again, then call finish."
 )
 
 FINISH_NO_CHANGES = (
