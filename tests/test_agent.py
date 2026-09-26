@@ -165,6 +165,33 @@ class WireFormatTests(unittest.TestCase):
         self.assertEqual(calls, ["old-model", "deepseek-v4-pro"])
         self.assertEqual(r.text, "hi")
 
+    def test_retries_when_thinking_uses_all_tokens(self):
+        sent = []
+
+        def fake(url, headers, body, timeout):
+            sent.append(body["max_tokens"])
+            if len(sent) == 1:
+                return {"choices": [{"message": {"content": "", "reasoning": "hmm..."},
+                                     "finish_reason": "length"}], "usage": {}}
+            return {"choices": [{"message": {"content": "OK"}, "finish_reason": "stop"}], "usage": {}}
+        L._post = fake
+        cfg = fake_config(tempfile.mkdtemp())
+        r = L.LLMClient(cfg).chat("sys", [{"role": "user", "content": "x"}], [])
+        self.assertEqual(sent, [4096, 8192])
+        self.assertEqual(r.text, "OK")
+
+    def test_no_think_switch(self):
+        sent = []
+
+        def fake(url, headers, body, timeout):
+            sent.append(body["messages"][0]["content"])
+            return {"choices": [{"message": {"content": "OK"}}], "usage": {}}
+        L._post = fake
+        cfg = fake_config(tempfile.mkdtemp())
+        cfg.thinking = "off"
+        L.LLMClient(cfg).chat("sys", [{"role": "user", "content": "x"}], [])
+        self.assertTrue(sent[0].endswith("/no_think"))
+
     def test_anthropic_merges_tool_results(self):
         def fake(url, headers, body, timeout):
             self.captured.append(body)

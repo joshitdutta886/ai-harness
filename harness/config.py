@@ -126,6 +126,7 @@ class Config:
     model: str = ""
     base_url: str = ""
     tool_mode: str = "auto"              # auto | native | text
+    thinking: str = "auto"               # auto | off  (off adds /no_think for hybrid Qwen models)
     temperature: float = 0.0
     max_output_tokens: int = 4096
     max_steps: int = 40
@@ -175,6 +176,7 @@ _ENV_MAP = {
     "AI_MODEL": ("model", str),
     "AI_BASE_URL": ("base_url", str),
     "AI_TOOL_MODE": ("tool_mode", str),
+    "AI_THINKING": ("thinking", str),
     "AI_TEMPERATURE": ("temperature", float),
     "HARNESS_MAX_STEPS": ("max_steps", int),
     "HARNESS_MAX_TOKENS": ("max_total_tokens", int),

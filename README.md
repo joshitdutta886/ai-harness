@@ -50,6 +50,7 @@ by an environment variable:
 | model | `AI_MODEL` | provider default (`deepseek-chat`, `qwen-plus`, …) |
 | base URL | `AI_BASE_URL` | provider default |
 | tool calling | `AI_TOOL_MODE` | `auto` (`native` or `text`) |
+| thinking | `AI_THINKING` | `auto` (`off` adds `/no_think` for hybrid Qwen models; faster locally) |
 | step budget | `HARNESS_MAX_STEPS` | 40 |
 | token budget | `HARNESS_MAX_TOKENS` | 800,000 |
 
@@ -112,6 +113,7 @@ npm, go, cargo, maven, gradle, make), `git_diff`, `finish`.
 - The same call repeated 3 times gets a warning to change approach.
 - 3 errors in a row get a "re-check your assumptions" hint.
 - If the model replies without a tool call, the harness nudges it; after 3 such replies it treats the text as a finish attempt.
+- If a reasoning model spends its whole output budget thinking and returns nothing, the request is retried with a larger budget (up to 16k tokens).
 - API errors are retried with exponential backoff and `Retry-After`. The client also adapts to endpoint quirks (`max_completion_tokens`, unsupported `temperature`, DeepSeek `reasoning_content`).
 
 **Robust tool calling for open models.** In `auto` mode the harness uses native function

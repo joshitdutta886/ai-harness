@@ -125,7 +125,9 @@ class Agent:
 
             self.ui.step(step, cfg.max_steps, self.result.input_tokens, self.result.output_tokens)
             tm = time.time()
+            wasted0 = getattr(self.llm, "wasted_tokens", 0)
             resp: LLMResponse = self.llm.chat(P.SYSTEM_PROMPT, self.messages, T.TOOL_SPECS)
+            self.result.input_tokens += getattr(self.llm, "wasted_tokens", 0) - wasted0  # count retried calls too
             tel = self.telemetry
             tel["model_calls"] += 1
             tel["model_seconds"] += time.time() - tm

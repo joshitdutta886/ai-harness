@@ -62,6 +62,9 @@ class LLMClient:
         self._send_temperature = True
         self._send_reasoning = False
         self._model_switched = False
+        self._length_retries = 0
+        self.wasted_tokens = 0
+        self.no_think = (cfg.thinking or "auto").lower() in ("off", "false", "0", "no")
         mode = (cfg.tool_mode or "auto").lower()
         self.text_mode = mode == "text"
         self._allow_mode_switch = mode == "auto" and not self.is_anthropic
@@ -73,8 +76,22 @@ class LLMClient:
             attempt += 1
             try:
                 if self.is_anthropic:
-                    return self._anthropic(system, messages, tools)
-                return self._openai(system, messages, tools)
+                    resp = self._anthropic(system, messages, tools)
+                else:
+                    resp = self._openai(system, messages, tools)
+                # Reasoning models can spend the whole output budget "thinking" and
+                # return nothing usable. Give them more room and ask again (twice max).
+                if (not resp.text and not resp.tool_calls
+                        and resp.stop_reason in ("length", "max_tokens")
+                        and self.cfg.max_output_tokens < 16384 and self._length_retries < 2):
+                    self._length_retries += 1
+                    self.cfg.max_output_tokens = min(16384, self.cfg.max_output_tokens * 2)
+                    print("   [harness] model ran out of output tokens while thinking; "
+                          "retrying with max_tokens=%d" % self.cfg.max_output_tokens, flush=True)
+                    self.wasted_tokens += resp.input_tokens + resp.output_tokens
+                    continue
+                self._length_retries = 0
+                return resp
             except urllib.error.HTTPError as e:
                 detail = ""
                 try:
@@ -214,6 +231,8 @@ class LLMClient:
     def _openai(self, system, messages, tools) -> LLMResponse:
         text_mode = self.text_mode
         sys_prompt = system + (text_tool_instructions(tools) if text_mode else "")
+        if self.no_think:
+            sys_prompt += "\n/no_think"
         out = [{"role": "system", "content": sys_prompt}]
 
         def push(role, content):
