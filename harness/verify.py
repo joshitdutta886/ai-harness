@@ -20,6 +20,9 @@ from . import tools as T
 
 _PYTEST_FAIL = re.compile(r"^(?:FAILED|ERROR)\s+(\S+?)(?:\s+-\s+.*)?$", re.M)
 _UNITTEST_FAIL = re.compile(r"^(?:FAIL|ERROR):\s+(\S+)\s+\(([^)]+)\)", re.M)
+# vitest: " FAIL  lib/a.test.ts > suite > case"   jest: "FAIL src/a.test.js"   also " × case 5ms"
+_JS_FAIL = re.compile(r"^\s*(?:FAIL|\u00d7|\u2715)\s+(\S.*?)\s*$", re.M)
+_DURATION = re.compile(r"\s+\d+(?:\.\d+)?\s*m?s$")
 _EXIT = re.compile(r"^exit code: (-?\d+)")
 
 
@@ -34,6 +37,8 @@ def failing_tests(output: str) -> Set[str]:
     for name, where in _UNITTEST_FAIL.findall(output or ""):
         # py3.11+: "test_x (pkg.mod.Class.test_x)"; older: "test_x (pkg.mod.Class)"
         ids.add(where if where.endswith("." + name) else "%s.%s" % (where, name))
+    for raw in _JS_FAIL.findall(output or ""):
+        ids.add(_DURATION.sub("", raw).strip())
     return ids
 
 

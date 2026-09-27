@@ -21,6 +21,10 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Sent on every HTTP request. Some API gateways (Cloudflare in front of Groq, for
+# example) reject Python's default "Python-urllib/x.y" agent with a 403 / error 1010.
+USER_AGENT = "ai-coding-harness/0.2 (+https://github.com/joshitdutta886/ai-harness)"
 CONFIG_PATH = os.path.join(ROOT, "config", "harness.json")
 
 # provider -> (base url, default model, preferred models in order)
@@ -109,7 +113,8 @@ def list_models(base_url: str, api_key: str, timeout: int = 12) -> Optional[List
     """Return model ids from GET {base}/models, or None if the key is rejected."""
     req = urllib.request.Request(
         base_url.rstrip("/") + "/models",
-        headers={"authorization": "Bearer " + api_key},
+        headers={"authorization": "Bearer " + api_key, "user-agent": USER_AGENT,
+                 "accept": "application/json"},
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -126,13 +131,13 @@ class Config:
     model: str = ""
     base_url: str = ""
     tool_mode: str = "auto"              # auto | native | text
-    thinking: str = "auto"               # auto | off  (off adds /no_think for hybrid Qwen models)
+    thinking: str = "auto"               # auto (adaptive: off until the model struggles) | off | on
     temperature: float = 0.0
     max_output_tokens: int = 4096
-    max_steps: int = 40
-    max_total_tokens: int = 800_000      # hard budget for a single task
-    context_char_budget: int = 100_000   # compaction kicks in above this (~25k tokens)
-    keep_recent_tool_results: int = 6    # tool outputs kept in full
+    max_steps: int = 30
+    max_total_tokens: int = 400_000      # hard budget for a single task
+    context_char_budget: int = 60_000    # compaction kicks in above this (~15k tokens)
+    keep_recent_tool_results: int = 3    # tool outputs kept in full
     command_timeout: int = 180
     max_minutes: float = 30.0            # wall-clock limit for one task
     request_timeout: int = 240
@@ -178,6 +183,7 @@ _ENV_MAP = {
     "AI_BASE_URL": ("base_url", str),
     "AI_TOOL_MODE": ("tool_mode", str),
     "AI_THINKING": ("thinking", str),
+    "AI_MAX_OUTPUT_TOKENS": ("max_output_tokens", int),
     "AI_TEMPERATURE": ("temperature", float),
     "HARNESS_MAX_STEPS": ("max_steps", int),
     "HARNESS_MAX_TOKENS": ("max_total_tokens", int),

@@ -15,7 +15,7 @@ import subprocess
 import sys
 import urllib.request
 
-from .config import ROOT, load_config
+from .config import ROOT, USER_AGENT, load_config
 from .ui import UI
 
 GH_ISSUE = re.compile(r"https?://github\.com/([^/\s]+)/([^/\s]+)/issues/(\d+)")
@@ -28,7 +28,7 @@ def fetch_github_issue(url: str) -> str:
     m = GH_ISSUE.search(url)
     owner, repo, num = m.group(1), m.group(2), m.group(3)
     api = "https://api.github.com/repos/%s/%s/issues/%s" % (owner, repo, num)
-    headers = {"accept": "application/vnd.github+json", "user-agent": "ai-harness"}
+    headers = {"accept": "application/vnd.github+json", "user-agent": USER_AGENT}
     tok = os.environ.get("GITHUB_TOKEN")
     if tok:
         headers["authorization"] = "Bearer " + tok

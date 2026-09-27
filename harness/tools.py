@@ -22,8 +22,11 @@ from typing import Callable, Dict, List, Optional
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "env", ".tox", ".mypy_cache",
              ".pytest_cache", "dist", "build", ".idea", ".vscode", "target", ".next", "site-packages",
              ".eggs", "runs"}
-MAX_OUTPUT = 8000
-MAX_READ_LINES = 300
+MAX_OUTPUT = 4000
+# Files that match almost any search but never hold the bug: excluded to save tokens.
+NOISE_FILES = ["*.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "*.min.js", "*.min.css",
+               "*.map", "*.svg", "*.snap"]
+MAX_READ_LINES = 200
 
 BLOCKED_PATTERNS = [
     r"\brm\s+-rf?\s+(/|~|\$HOME)(\s|$)", r"\bgit\s+push\b", r"\bgit\s+reset\s+--hard\b",
@@ -57,16 +60,28 @@ class Workspace:
         self.test_command: Optional[str] = None
         self.files_read: set = set()
         self.baseline_test_output: str = ""
+        self.baseline_seconds: float = 0.0
+        self.shown: Dict[str, tuple] = {}   # rel path -> (file text, set of line numbers shown in the overview)
         self.target_test_command: Optional[str] = None   # evaluator-supplied "test case"
         self.baseline = None                              # verify.Snapshot of the suite before edits
         self.target_baseline = None                       # verify.Snapshot of the target test before edits
 
     # --------------------------------------------------------------- paths
+    def _inside(self, full: str) -> bool:
+        return full == self.root or full.startswith(self.root + os.sep)
+
     def resolve(self, path: str) -> str:
-        path = (path or ".").strip()
+        path = (path or ".").strip() or "."
+        if os.path.isabs(path):
+            full = os.path.realpath(path)
+            if self._inside(full):
+                return full
+            # Models often write repo paths as "/app/x.ts": treat them as repo-relative.
+            path = path.lstrip("/\\") or "."
         full = os.path.realpath(os.path.join(self.root, path))
-        if full != self.root and not full.startswith(self.root + os.sep):
-            raise ValueError("Path '%s' is outside the repository." % path)
+        if not self._inside(full):
+            raise ValueError("Path '%s' is outside the repository. Use a path relative to the "
+                             "repository root, e.g. 'src/app.py'." % path)
         return full
 
     def rel(self, full: str) -> str:
@@ -81,6 +96,13 @@ class Workspace:
                     self.originals[rel] = f.read()
             else:
                 self.originals[rel] = None
+
+    def mark_shown(self, rel: str, first: int, last: int, text: str) -> None:
+        """Remember lines the model already has in its first message (never compacted)."""
+        prev = self.shown.get(rel)
+        lines = set(prev[1]) if prev and prev[0] == text else set()
+        lines.update(range(first, last + 1))
+        self.shown[rel] = (text, lines)
 
     # --------------------------------------------------------------- diff
     def diff(self) -> str:
@@ -172,11 +194,11 @@ def list_dir(ws: Workspace, path: str = ".", depth: int = 2) -> str:
         indent = "  " * level
         if level > 0:
             lines.append("%s%s/" % ("  " * (level - 1), os.path.basename(dirpath)))
-        for f in sorted(filenames)[:60]:
+        for f in sorted(filenames)[:40]:
             lines.append("%s%s" % (indent, f))
-        if len(filenames) > 60:
-            lines.append("%s... (%d more files)" % (indent, len(filenames) - 60))
-        if len(lines) > 400:
+        if len(filenames) > 40:
+            lines.append("%s... (%d more files)" % (indent, len(filenames) - 40))
+        if len(lines) > 200:
             lines.append("... (listing truncated; list a subdirectory)")
             break
     return "\n".join(lines) or "(empty directory)"
@@ -197,46 +219,103 @@ def find_files(ws: Workspace, pattern: str) -> str:
     return "\n".join(sorted(matches))
 
 
-def search_code(ws: Workspace, query: str, path: str = ".", regex: bool = False,
-                file_glob: str = "", max_results: int = 60) -> str:
-    base = ws.resolve(path)
-    max_results = max(1, min(int(max_results or 60), 200))
+_REGEX_HINT = re.compile(r"\.\*|\.\+|\\[wsdb]|[|^$\[\]()]")
+
+
+def _search(ws: Workspace, base: str, query: str, regex: bool, ignore_case: bool, file_glob: str):
     if shutil.which("rg"):
-        cmd = ["rg", "-n", "--no-heading", "--color", "never", "-M", "300"]
+        cmd = ["rg", "-n", "--no-heading", "--color", "never", "-M", "200"]
         if not regex:
             cmd.append("-F")
+        if ignore_case:
+            cmd.append("-i")
         if file_glob:
             cmd += ["-g", file_glob]
         for d in SKIP_DIRS:
             cmd += ["-g", "!%s/" % d]
+        for g in NOISE_FILES:
+            cmd += ["-g", "!" + g]
         cmd += ["-e", query, base]
-        try:
-            p = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            lines = [l.replace(ws.root + os.sep, "") for l in p.stdout.splitlines()]
-        except subprocess.TimeoutExpired:
-            return "Error: search timed out. Narrow the path or query."
-    else:
-        lines = []
-        pat = re.compile(query if regex else re.escape(query))
-        for dirpath, dirnames, filenames in os.walk(base):
-            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
-            for fn in filenames:
-                if file_glob and not fnmatch.fnmatch(fn, file_glob):
-                    continue
-                full = os.path.join(dirpath, fn)
-                try:
-                    with open(full, "r", encoding="utf-8", errors="strict") as fh:
-                        for i, line in enumerate(fh, 1):
-                            if pat.search(line):
-                                lines.append("%s:%d:%s" % (ws.rel(full), i, line.rstrip()[:300]))
-                except (UnicodeDecodeError, OSError):
-                    continue
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        return [l.replace(ws.root + os.sep, "") for l in p.stdout.splitlines()]
+    lines = []
+    pat = re.compile(query if regex else re.escape(query), re.I if ignore_case else 0)
+    # os.walk() yields nothing for a file, so a single-file search is handled explicitly
+    walk = [(os.path.dirname(base), [], [os.path.basename(base)])] if os.path.isfile(base) else os.walk(base)
+    for dirpath, dirnames, filenames in walk:
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        for fn in filenames:
+            if file_glob and not fnmatch.fnmatch(fn, file_glob):
+                continue
+            if any(fnmatch.fnmatch(fn, g) for g in NOISE_FILES):
+                continue
+            full = os.path.join(dirpath, fn)
+            try:
+                with open(full, "r", encoding="utf-8", errors="strict") as fh:
+                    for i, line in enumerate(fh, 1):
+                        if pat.search(line):
+                            lines.append("%s:%d:%s" % (ws.rel(full), i, line.rstrip()[:200]))
+            except (UnicodeDecodeError, OSError):
+                continue
+    return lines
+
+
+def _valid_regex(q: str) -> bool:
+    try:
+        re.compile(q)
+        return True
+    except re.error:
+        return False
+
+
+def search_code(ws: Workspace, query: str, path: str = ".", regex: bool = False,
+                file_glob: str = "", max_results: int = 30) -> str:
+    """Search file contents. If the exact search finds nothing, it automatically retries
+    as a regex (when the query looks like one), ignoring case, and word by word, and it
+    says which fallback produced the results."""
+    base = ws.resolve(path)
+    max_results = max(1, min(int(max_results or 30), 100))
+    query = str(query or "")
+    if not query.strip():
+        return "Error: empty search query."
+    if regex and not _valid_regex(query):
+        regex = False
+    attempts = [(query, regex, False, "")]
+    if not regex and _REGEX_HINT.search(query) and _valid_regex(query):
+        attempts.append((query, True, False, "as a regex"))
+    attempts.append((query, regex, True, "ignoring case"))
+    if not regex and _REGEX_HINT.search(query) and _valid_regex(query):
+        attempts.append((query, True, True, "as a regex, ignoring case"))
+    try:
+        lines, note = [], ""
+        for q, rx, ic, label in attempts:
+            lines = _search(ws, base, q, rx, ic, file_glob)
+            if lines:
+                note = label
+                break
+        if not lines:
+            words = [w for w in re.split(r"[^A-Za-z0-9_]+", query) if len(w) >= 3]
+            if len(words) > 1:
+                seen = set()
+                for w in words:
+                    for l in _search(ws, base, w, False, True, file_glob):
+                        if l not in seen:
+                            seen.add(l)
+                            lines.append(l)
+                if lines:
+                    note = "for the separate words %s (ignoring case)" % ", ".join("'%s'" % w for w in words)
+    except subprocess.TimeoutExpired:
+        return "Error: search timed out. Narrow the path or query."
     if not lines:
-        return "No matches for '%s'." % query
+        return ("No matches for '%s' (also tried: ignoring case%s). Try a shorter or different name, "
+                "find_files('*part-of-name*') to locate files by name, or list_dir on a folder." % (
+                    query, ", as a regex, word by word" if _REGEX_HINT.search(query) or " " in query else ""))
     total = len(lines)
     out = "\n".join(lines[:max_results])
     if total > max_results:
         out += "\n... (%d more matches; narrow the search)" % (total - max_results)
+    if note:
+        out = "No exact matches for '%s'; showing matches %s:\n%s" % (query, note, out)
     return out
 
 
@@ -255,13 +334,35 @@ def read_file(ws: Workspace, path: str, start_line: int = 1, end_line: Optional[
     start = max(1, int(start_line or 1))
     end = int(end_line) if end_line else min(n, start + MAX_READ_LINES - 1)
     end = min(end, n, start + MAX_READ_LINES - 1)
-    ws.files_read.add(ws.rel(full))
-    body = "".join("%6d\t%s" % (i, lines[i - 1]) for i in range(start, end + 1))
-    header = "%s (lines %d-%d of %d)\n" % (ws.rel(full), start, end, n)
+    rel = ws.rel(full)
+    ws.files_read.add(rel)
+    wanted = list(range(start, end + 1))
+    seen = ws.shown.get(rel)
+    omitted = []
+    if seen and seen[0] == "".join(lines).rstrip("\n") and wanted:
+        omitted = [i for i in wanted if i in seen[1]]
+        if len(omitted) == len(wanted):
+            return ("%s lines %d-%d are already in the repository overview above and are unchanged: "
+                    "use that text (without the line numbers) for edit_file." % (rel, start, end))
+    body = "".join("%6d\t%s" % (i, lines[i - 1]) for i in wanted if i not in omitted)
+    header = "%s (lines %d-%d of %d)\n" % (rel, start, end, n)
+    if omitted:
+        header += "(lines %s are already in the overview above and unchanged; omitted here)\n" % _ranges(omitted)
     footer = ""
     if end < n:
         footer = "\n... %d more lines. Call read_file with start_line=%d to continue." % (n - end, end + 1)
     return header + (body if body else "(empty file)\n") + footer
+
+
+def _ranges(nums: List[int]) -> str:
+    out, i = [], 0
+    while i < len(nums):
+        j = i
+        while j + 1 < len(nums) and nums[j + 1] == nums[j] + 1:
+            j += 1
+        out.append(str(nums[i]) if i == j else "%d-%d" % (nums[i], nums[j]))
+        i = j + 1
+    return ", ".join(out)
 
 
 def _syntax_check(full: str) -> str:
@@ -355,6 +456,7 @@ def run_command(ws: Workspace, command: str, timeout: Optional[int] = None) -> s
         partial = (e.stdout or "") if isinstance(e.stdout, str) else ""
         return "Error: command timed out after %ds.\n%s" % (timeout, truncate(partial, 3000))
     out = (p.stdout or "") + (("\n[stderr]\n" + p.stderr) if p.stderr else "")
+    out = out.replace(ws.root + os.sep, "").replace(ws.root, ".")   # repo-relative paths: shorter, clearer
     return "exit code: %d  (%.1fs)\n%s" % (p.returncode, time.time() - t0, truncate(out.strip() or "(no output)"))
 
 
@@ -407,60 +509,44 @@ def _schema(props: dict, required: List[str]) -> dict:
     return {"type": "object", "properties": props, "required": required}
 
 
+# Short on purpose: these schemas are sent with every model call.
+_S, _I, _B = {"type": "string"}, {"type": "integer"}, {"type": "boolean"}
+
 TOOL_SPECS = [
-    {"name": "list_dir",
-     "description": "List files and folders (tree view). Use first to learn the repository layout.",
-     "parameters": _schema({"path": {"type": "string", "description": "Directory relative to repo root. Default '.'"},
-                            "depth": {"type": "integer", "description": "How many levels deep (1-4). Default 2"}}, [])},
-    {"name": "find_files",
-     "description": "Find files by name or glob, e.g. '*.py', 'test_*.py', 'src/**/config*'.",
-     "parameters": _schema({"pattern": {"type": "string"}}, ["pattern"])},
     {"name": "search_code",
-     "description": "Search file contents (like grep). Returns path:line:text. Use it to locate functions, "
-                    "error messages and names mentioned in the issue.",
-     "parameters": _schema({"query": {"type": "string", "description": "Text to find"},
-                            "path": {"type": "string", "description": "Folder or file to search. Default '.'"},
-                            "regex": {"type": "boolean", "description": "Treat query as a regex. Default false"},
-                            "file_glob": {"type": "string", "description": "Only files matching this glob, e.g. '*.py'"}},
-                           ["query"])},
+     "description": "Search file contents (like grep). Returns path:line:text. Falls back to regex, "
+                    "ignoring case, and word-by-word when nothing matches exactly.",
+     "parameters": _schema({"query": _S, "path": _S, "regex": _B}, ["query"])},
     {"name": "read_file",
-     "description": "Read a file with line numbers (max 300 lines per call). Use start_line/end_line for large files.",
-     "parameters": _schema({"path": {"type": "string"},
-                            "start_line": {"type": "integer"},
-                            "end_line": {"type": "integer"}}, ["path"])},
+     "description": "Read a file with line numbers (max 200 lines). Use start_line/end_line.",
+     "parameters": _schema({"path": _S, "start_line": _I, "end_line": _I}, ["path"])},
     {"name": "edit_file",
-     "description": "Replace an exact block of text in a file. old_str must match the file exactly "
-                    "(including indentation) and be unique; include 2-3 surrounding lines to make it unique. "
-                    "Do NOT include line numbers from read_file output.",
-     "parameters": _schema({"path": {"type": "string"},
-                            "old_str": {"type": "string", "description": "Exact existing text"},
-                            "new_str": {"type": "string", "description": "Replacement text"},
-                            "replace_all": {"type": "boolean"}}, ["path", "old_str", "new_str"])},
+     "description": "Replace old_str (exact, unique text from the file, without line numbers) with new_str. "
+                    "Tests run automatically afterwards.",
+     "parameters": _schema({"path": _S, "old_str": _S, "new_str": _S, "replace_all": _B},
+                           ["path", "old_str", "new_str"])},
     {"name": "create_file",
-     "description": "Create a new file (or fully overwrite a small one). Prefer edit_file for existing files.",
-     "parameters": _schema({"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"])},
-    {"name": "run_command",
-     "description": "Run a shell command in the repository root (non-interactive, with timeout). Use for "
-                    "reproducing bugs, running scripts, git log/status, installing a missing test dependency.",
-     "parameters": _schema({"command": {"type": "string"},
-                            "timeout": {"type": "integer", "description": "Seconds. Default 180"}}, ["command"])},
-    {"name": "run_tests",
-     "description": "Run tests. With no command it runs the target test for this task if one was given, "
-                    "otherwise the auto-detected suite. Pass an explicit command to run a specific file or "
-                    "the whole suite. You MUST run tests successfully after your last edit before calling finish.",
-     "parameters": _schema({"command": {"type": "string", "description": "Optional explicit test command"},
-                            "timeout": {"type": "integer"}}, [])},
+     "description": "Create a new file.",
+     "parameters": _schema({"path": _S, "content": _S}, ["path", "content"])},
     {"name": "revert_file",
-     "description": "Undo all your changes to one file, restoring the original. Use it when an edit "
-                    "went wrong and you want a clean start on that file.",
-     "parameters": _schema({"path": {"type": "string"}}, ["path"])},
-    {"name": "git_diff",
-     "description": "Show the diff of every change you have made so far. Review it before finishing.",
-     "parameters": _schema({}, [])},
+     "description": "Undo all your changes to a file.",
+     "parameters": _schema({"path": _S}, ["path"])},
+    {"name": "list_dir",
+     "description": "List a directory tree (depth 1-4, default 2).",
+     "parameters": _schema({"path": _S, "depth": _I}, [])},
+    {"name": "find_files",
+     "description": "Find files by name glob, e.g. '*config*'.",
+     "parameters": _schema({"pattern": _S}, ["pattern"])},
+    {"name": "run_tests",
+     "description": "Run the target test (or the detected suite). Optional explicit command.",
+     "parameters": _schema({"command": _S}, [])},
+    {"name": "run_command",
+     "description": "Run a shell command in the repo root (non-interactive, timeout).",
+     "parameters": _schema({"command": _S, "timeout": _I}, ["command"])},
     {"name": "finish",
-     "description": "Call when the task is fully done and verified. Give a short summary of the root cause, "
-                    "the fix, and the test evidence.",
-     "parameters": _schema({"summary": {"type": "string"}}, ["summary"])},
+     "description": "End the task with a one-line summary. Send it in the SAME turn as your final edit_file: "
+                    "the harness runs the tests first and rejects finish if they fail.",
+     "parameters": _schema({"summary": _S}, ["summary"])},
 ]
 
 TOOL_FUNCS: Dict[str, Callable] = {
@@ -477,6 +563,48 @@ TOOL_FUNCS: Dict[str, Callable] = {
 }
 
 
+# Argument names other models commonly use for the same thing. Translating them saves
+# a failed call (a real run looped for 30 steps on read_file(line_start=..., line_end=...)).
+_PATH = {"file": "path", "filename": "path", "file_path": "path", "filepath": "path", "file_name": "path"}
+ARG_ALIASES: Dict[str, Dict[str, str]] = {
+    "read_file": dict(_PATH, line_start="start_line", start="start_line", from_line="start_line",
+                      startline="start_line", begin="start_line", line_end="end_line", end="end_line",
+                      to_line="end_line", endline="end_line", stop="end_line"),
+    "edit_file": dict(_PATH, old="old_str", old_string="old_str", old_text="old_str", search="old_str",
+                      find="old_str", new="new_str", new_string="new_str", new_text="new_str",
+                      replace="new_str", replacement="new_str", all="replace_all"),
+    "create_file": dict(_PATH, text="content", contents="content", data="content", body="content"),
+    "revert_file": dict(_PATH),
+    "search_code": dict(pattern="query", text="query", q="query", term="query", search="query",
+                        dir="path", directory="path", folder="path", is_regex="regex", use_regex="regex"),
+    "list_dir": dict(dir="path", directory="path", folder="path", max_depth="depth", level="depth"),
+    "find_files": dict(glob="pattern", name="pattern", query="pattern", filename="pattern"),
+    "run_command": dict(cmd="command", shell="command", timeout_seconds="timeout"),
+    "run_tests": dict(cmd="command", test_command="command", timeout_seconds="timeout"),
+}
+
+
+def _normalize_args(name: str, fn: Callable, args: dict):
+    """Map alias names onto real parameters; return (args, unknown names)."""
+    import inspect
+    params = [p for p in inspect.signature(fn).parameters if p != "ws"]
+    aliases = ARG_ALIASES.get(name, {})
+    out, unknown = {}, []
+    for k, v in args.items():
+        key = k if k in params else aliases.get(k, aliases.get(k.lower(), k))
+        if key in params:
+            out.setdefault(key, v)
+        else:
+            unknown.append(k)
+    if name == "read_file" and "limit" in unknown and "end_line" not in out:
+        try:
+            out["end_line"] = int(out.get("start_line", 1) or 1) + int(args["limit"]) - 1
+            unknown.remove("limit")
+        except (TypeError, ValueError):
+            pass
+    return out, unknown, params
+
+
 def execute(ws: Workspace, name: str, args: dict) -> str:
     """Run a tool and always return text (errors included)."""
     if "__invalid_json__" in args:
@@ -485,10 +613,14 @@ def execute(ws: Workspace, name: str, args: dict) -> str:
     fn = TOOL_FUNCS.get(name)
     if fn is None:
         return "Error: unknown tool '%s'. Available: %s" % (name, ", ".join(list(TOOL_FUNCS) + ["finish"]))
+    args, unknown, params = _normalize_args(name, fn, args or {})
+    if unknown:
+        return ("Error: %s has no argument(s) %s. Its arguments are: %s." % (
+            name, ", ".join(repr(u) for u in unknown), ", ".join(params)))
     try:
         return fn(ws, **args)
     except TypeError as e:
-        return "Error: bad arguments for %s: %s" % (name, e)
+        return "Error: bad arguments for %s: %s. Its arguments are: %s." % (name, e, ", ".join(params))
     except ValueError as e:
         return "Error: %s" % e
     except Exception as e:  # never crash the loop

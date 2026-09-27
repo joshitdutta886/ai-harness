@@ -6,10 +6,10 @@
   "tool_mode": "auto",
   "temperature": 0.0,
   "max_output_tokens": 4096,
-  "max_steps": 40,
-  "max_total_tokens": 800000,
-  "context_char_budget": 100000,
-  "keep_recent_tool_results": 6,
+  "max_steps": 30,
+  "max_total_tokens": 400000,
+  "context_char_budget": 60000,
+  "keep_recent_tool_results": 3,
   "command_timeout": 180,
   "max_minutes": 30
 }

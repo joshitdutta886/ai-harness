@@ -4,6 +4,7 @@
 #   make test    run the harness's own automated tests (offline, no API key needed)
 #   make clean   remove generated artefacts
 #   make ui      optional web UI: watch runs live, replay them, start new ones
+#   make bench   offline token benchmark on the practice tasks (no API key)
 #
 # Optional variables for make run:
 #   REPO=<path or git URL>   ISSUE=<text | file | GitHub issue URL>   ISSUE_FILE=<file>
@@ -19,7 +20,7 @@ export PYTHONUNBUFFERED := 1
 # ISSUE or TEST_CMD survive intact (harness/cli.py reads these variables).
 export REPO ISSUE ISSUE_FILE TEST_CMD
 
-.PHONY: setup run test clean demo check report eval ui help
+.PHONY: setup run test clean demo check report eval ui bench help
 
 help:
 	@grep -E "^#" Makefile | head -12
@@ -43,6 +44,9 @@ run:
 demo:
 	@mkdir -p runs && rm -rf runs/demo_repo && cp -r examples/sample_repo runs/demo_repo
 	@$(PY) -m harness --repo runs/demo_repo --issue-file examples/sample_issue.md
+
+bench:
+	@$(PY) -m harness.tokenbench
 
 ui:
 	@$(PY) -m harness.web

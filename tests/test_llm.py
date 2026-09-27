@@ -57,6 +57,36 @@ class ConfigTests(unittest.TestCase):
             Config(api_key="k", provider="custom").resolve(probe=False)
 
 
+class UserAgentTests(unittest.TestCase):
+    """Cloudflare-fronted APIs (e.g. Groq) block Python's default agent with 403 / error 1010."""
+
+    def test_requests_send_harness_user_agent(self):
+        import urllib.request
+        from harness import config as CF
+        from harness import llm as L
+        seen = []
+
+        class FakeResp:
+            def __init__(self, body): self.body = body
+            def read(self): return self.body
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def fake_urlopen(req, timeout=None):
+            seen.append(req.get_header("User-agent"))
+            return FakeResp(b'{"data": [{"id": "m"}], "choices": [{"message": {"content": "ok"}}]}')
+        orig = urllib.request.urlopen
+        urllib.request.urlopen = fake_urlopen
+        try:
+            L._post("https://example.invalid/v1/chat/completions", {"authorization": "Bearer x"}, {}, 5)
+            CF.list_models("https://example.invalid/v1", "x")
+        finally:
+            urllib.request.urlopen = orig
+        self.assertEqual(len(seen), 2)
+        for ua in seen:
+            self.assertTrue(ua and ua.startswith("ai-coding-harness/"), ua)
+
+
 class ContextTests(unittest.TestCase):
     def test_keywords(self):
         kws = extract_keywords("`Cart.total()` fails in shop/cart.py when apply_discount runs; see CartTotals")

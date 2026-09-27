@@ -4,6 +4,10 @@ An autonomous coding agent. Give it a repository and a GitHub issue; it finds th
 relevant code, fixes the root cause, runs the tests, and only reports success when
 the harness itself has verified the fix.
 
+It is built to use **as few tokens as possible**. On the bundled practice tasks it resolves
+each bug in **one model call, about 1,500 tokens per task**. An earlier version of this same
+harness used about 17,000 tokens and 6 calls per task (see [Token efficiency](#token-efficiency)).
+
 Built for the LCC × DevClub AI Coding Harness Hackathon 2026, and tuned for the
 evaluation models (DeepSeek and Qwen).
 
@@ -29,6 +33,7 @@ make demo                                                   # bundled buggy repo
 make check                                                  # test the API key / model connection
 make report                                                 # table of all runs: status, tokens, steps, errors
 make eval                                                   # run every practice task, print a score table
+make bench                                                  # offline token benchmark (no API key)
 ```
 
 `TEST_CMD` is the evaluator's test case: a command that must pass once the issue is
@@ -41,6 +46,40 @@ runs the bundled demo.
 
 Requirements: Python 3.8+ and git. The harness itself uses **only the Python standard library**,
 so `make setup` has nothing that can fail to install.
+
+## Token efficiency
+
+Every model call re-sends the system prompt, the tool schemas and the conversation so far,
+so the total cost is roughly *calls × context size*. The harness cuts both.
+
+| What changed | Why it saves tokens |
+|---|---|
+| Short system prompt (~210 tokens) and tool schemas (~600) | These are re-sent on every call. Together they were ~1,600 tokens per call and are now ~815. |
+| **The harness runs the tests after every edit** and attaches the result to the edit's reply | The model never spends a call on "run the tests". |
+| **The run stops as soon as the fix is proven**: the target test goes from failing to passing and the regression check shows no new failures | No extra "finish" or "review" calls. |
+| **"Likely relevant code" in the first message**: the definitions of names from the issue, plus functions they call (one hop), up to 60 lines | The model can often edit right away, with no search and no read calls. |
+| The first message keeps only high-value facts: file tree (capped), code locations ranked source → tests → docs, test verdicts, and failing test names | No commit log, no passing test logs, and no duplicate failure output. |
+| Only the last 3 tool outputs stay in full; older ones become one-line stubs | The history stops growing with every step. |
+| Output caps: 4k characters per tool result, 200 lines per file read, 30 search hits; lock files and minified files are never searched | One tool call can't flood the context. |
+| **Adaptive thinking**: reasoning starts off (`/no_think`, plus `enable_thinking: false` on DashScope). It turns on only after two failed test runs or a rejected finish | Easy bugs don't pay for long hidden "thinking" output; hard ones still get full reasoning. |
+| No `git_diff` tool or review step | The edit reply already shows the changed lines. |
+| The model may send **edit and finish in the same reply**; the harness runs the tests before accepting the finish | With no target test, a confident fix takes one call instead of two (a real Qwen run was 2 calls and ~4,100 tokens). |
+| The **target test's source code** goes in the first message | The model sees the expected values without opening the test file. |
+| **Code already in the first message is never sent again**: a `read_file` of unchanged lines already shown returns a one-line note, and only the missing lines are sent | Real runs showed models re-reading code they already had. |
+| Test output uses repo-relative paths and drops decorative separator lines | Shorter failure messages on every call. |
+
+Measured with `make bench`. This runs the same scripted agent on the three practice tasks
+and counts tokens as characters / 4 of every request and reply:
+
+| Version | Calls per task | Tokens per task | Resolved |
+|---|---|---|---|
+| Before the token work | 6 | ~17,300 | 3/3 |
+| **Now** | **1** | **~1,500** | **3/3** |
+
+The scripted agent behaves like a sensible model: it skips searching or reading code that
+is already visible, and it never calls a tool the harness doesn't offer. `tests/test_tokens.py`
+fails if a practice task needs more than 3 calls or 6,000 tokens, or if the fixed cost per
+call goes above 900 tokens, so the savings can't quietly regress.
 
 ## Design decisions
 
@@ -92,9 +131,10 @@ by an environment variable:
 | model | `AI_MODEL` | picked from the provider's `/models` list (see below) |
 | base URL | `AI_BASE_URL` | provider default |
 | tool calling | `AI_TOOL_MODE` | `auto` (`native` or `text`) |
-| thinking | `AI_THINKING` | `auto` (`off` adds `/no_think` for hybrid Qwen models; faster locally) |
-| step budget | `HARNESS_MAX_STEPS` | 40 |
-| token budget | `HARNESS_MAX_TOKENS` | 800,000 |
+| thinking | `AI_THINKING` | `auto`: adaptive, off until the model struggles (`on` / `off` to force) |
+| max output tokens per reply | `AI_MAX_OUTPUT_TOKENS` | 4096 (lowered automatically if the provider reports a smaller limit) |
+| step budget | `HARNESS_MAX_STEPS` | 30 |
+| token budget | `HARNESS_MAX_TOKENS` | 400,000 |
 | time limit | `HARNESS_MAX_MINUTES` | 30 |
 
 **Model auto-selection.** Model names change often (DeepSeek and Qwen both release new
@@ -126,42 +166,52 @@ Temperature defaults to 0 for reproducible runs.
 ## How it works
 
 ```
- issue ──► [1] context gathering ──► [2] agent loop ─────────────► [3] verification gate ──► report
-            (no LLM calls)            model ⇄ tools                    target test must pass
-            repo tree                 search / read / edit / revert    no NEW failures vs
-            test command              run tests / diff                  baseline suite run
-            issue identifiers         compaction, recovery,             rejects unverified
-            baseline + target run     step/token/time budgets           "finish" calls
+ issue ──► [1] context gathering ──► [2] agent loop ──────────────► [3] verification ──► report
+            (no model calls)          model ⇄ tools                     target test must pass
+            file tree, test command    search / read / edit / revert     no NEW failures vs the
+            code locations +          harness auto-runs tests           baseline suite run
+            likely relevant code        after every edit                stops the run the moment
+            baseline + target run     compaction, recovery, budgets     the fix is proven
 ```
 
 ### 1. Context gathering (`harness/context.py`)
-Before the first model call, the harness collects a compact overview for free:
-the repo tree, the detected test command, recent commits, a **baseline test run** (and
-the target test, if one was given, so the model sees the bug fail before it starts), and
-**where each identifier named in the issue appears in the code** (function names, file
-paths, `code spans`, CamelCase/snake_case words). This usually saves the model 3-5
-exploratory steps, which is the biggest single token saving.
+Before the first model call, the harness collects a compact overview, with no model calls:
+
+- the file tree (capped) and the detected test command
+- **where each name from the issue appears in the code**: function names, file paths, `code spans`, and CamelCase, snake_case and kebab-case words, ranked source → tests → docs
+- **the likely relevant code**: the definitions of those names, plus the functions they call (one hop), up to 60 lines
+- the **target test's source code**, when the target command names a test (`path::test` or `pkg.module.Class.test`)
+- the **target test result before any change**, including its assertion error
+- a one-line **baseline suite verdict** with the names of tests that were already failing
+
+For typical bugs the model can edit right away from this message.
 
 ### 2. Agent loop (`harness/agent.py`)
-A single tool-calling loop with a structured workflow in the system prompt:
-understand → locate → reproduce → plan → fix → verify → review → finish.
+A single tool-calling loop. The system prompt asks for: locate → minimal fix → (the harness
+tests it) → finish. After every edit, **the harness runs the target test (or the suite)
+itself** and attaches the result to the edit's reply. When the target test flips from
+failing to passing, the harness runs its regression check and, if that passes, **ends the
+run as resolved without another model call**.
 
 Tools (`harness/tools.py`): `list_dir`, `find_files`, `search_code` (ripgrep with a
 pure-Python fallback), `read_file` (line-numbered, paged), `edit_file` (exact unique
 search/replace), `create_file`, `revert_file` (undo all changes to a file), `run_command`,
 `run_tests` (runs the target test, or auto-detects pytest, unittest, npm, go, cargo, maven,
-gradle, make), `git_diff`, `finish`.
+gradle, make), `finish`.
 
 **Recovery**, so the model can fix its own mistakes:
 - Tool errors come back as text with a concrete next step, and are never raised.
 - A failed `edit_file` shows the closest matching block in the file.
 - Every Python edit is syntax-checked right away.
 - `revert_file` lets the model throw away a broken attempt and start that file again.
-- A missing file suggests similar paths.
-- The same call repeated 3 times gets a warning to change approach.
+- A missing file suggests similar paths. Paths written as `/app/x.ts` are read as repo-relative (`app/x.ts`), because models often write them that way.
+- `search_code` never dead-ends silently. If an exact search finds nothing, it retries as a regex (when the query looks like one), ignoring case, and word by word, and it says which fallback found the results. If nothing matches at all, it suggests `find_files` or `list_dir`.
+- The same call repeated 3 times gets a warning to change approach. A call that returned nothing or an error gets the warning on its second repeat.
+- Common alternative argument names are accepted and translated, such as `line_start`→`start_line`, `file`→`path` and `old_string`→`old_str`. An unknown argument gets an error that lists the real ones, so a model's naming habit can't cause a loop.
 - 3 errors in a row get a "re-check your assumptions" hint.
 - If the model replies without a tool call, the harness nudges it; after 3 such replies it treats the text as a finish attempt.
 - If a reasoning model spends its whole output budget thinking and returns nothing, the request is retried with a larger budget (up to 16k tokens).
+- If the provider rejects a request because `max_tokens` is above its output limit (for example Groq's free tier: "OTPM limit 1000"), the harness reads the limit from the error, lowers `max_tokens` and retries. Later retries never go above that limit.
 - API errors are retried with exponential backoff and `Retry-After`. The client also adapts to endpoint quirks (`max_completion_tokens`, unsupported `temperature`, DeepSeek `reasoning_content`).
 
 **Robust tool calling for open models.** In `auto` mode the harness uses native function
@@ -177,19 +227,27 @@ The harness never takes the model's word that a fix works.
   1. **Target check:** the target test (`TEST_CMD`), if given, must pass. It was also run
      before any change, so the report shows it failing before and passing after.
   2. **Regression check:** the full suite runs again and is compared with the baseline run
-     from before the first edit. Failing test ids are parsed from pytest and unittest output.
+     from before the first edit. Failing test ids are parsed from pytest, unittest, vitest
+     and jest output.
      Tests that were **already failing** before the change are reported but don't block the
      fix. Any **new** failure rejects the finish, and the model is told exactly which tests broke.
+- The same check runs automatically after an edit makes the target test pass; if it holds,
+  the run ends there.
 - The status is `RESOLVED` only when this check passes; otherwise the run ends as
   `FINISHED_UNVERIFIED`. If the loop stops early (step, token or time budget), the harness
   still runs the check, so the report always says whether the final code works.
 
 ### Efficiency
-- Every tool output is truncated head+tail (8k chars max; file reads max 300 lines).
-- **Context compaction:** tool outputs older than the 6 most recent are replaced with one-line stubs, with more aggressive trimming above a 100k-character budget. The issue is never trimmed.
-- A status line after every tool result (step, changed files, test state) keeps the model oriented without re-reading.
-- Hard step, token and wall-clock budgets, plus a "wrap up" warning near the end.
-- Token usage is tracked and reported for every run.
+See [Token efficiency](#token-efficiency). In short:
+
+- auto-tests after edits and an early verified stop
+- likely relevant code in the first message
+- short prompts and tool schemas, and adaptive thinking
+- truncated outputs (4k characters, 200-line reads) and compaction (the last 3 outputs stay in full)
+- a one-line status after each tool result
+- hard step, token and wall-clock budgets
+
+Token usage is tracked and reported for every run.
 
 ### Safety
 - All paths are confined to the target repository.
@@ -250,7 +308,7 @@ reproduces. `make test` runs this check too.
 ## Project layout
 
 ```
-Makefile              setup / run / test / clean (+ demo, check, report, eval, ui)
+Makefile              setup / run / test / clean (+ demo, check, report, eval, ui, bench)
 config/harness.json   model + budget configuration (no secrets)
 harness/
   cli.py              entry point, interactive prompts, GitHub issue fetch, repo clone
@@ -260,12 +318,14 @@ harness/
   verify.py           target check + regression check against the baseline run
   eval.py             runs the practice task set and prints a score table
   report.py           aggregates all runs (make report)
+  tokenbench.py       offline token benchmark (make bench)
   web.py, web/        optional local dashboard (make ui): live view, replay, start runs
   context.py          repo overview, issue keyword search, context compaction
   tools.py            the tools and their JSON schemas
   prompts.py          system prompt and harness messages
   ui.py               terminal output
-tests/                45 offline tests (tools, parsing, wire formats, verification, full loop with a scripted model)
+tests/                71 offline tests (tools, parsing, wire formats, verification, web UI,
+                      full loop with a scripted model, and regressions from a real-repo run)
 examples/             demo repo + practice tasks (tasks.json), each with a real bug and an issue
 ```
 
@@ -281,3 +341,16 @@ scripted fake model. The tests check that:
 - repeat warnings fire
 - the model is switched when the configured one does not exist
 - the request bodies sent to each API style are well-formed
+- token use stays low: `tests/test_tokens.py` caps calls and tokens per practice task
+- every HTTP request carries a harness User-Agent, because Cloudflare-fronted APIs such as Groq block Python's default one (error 1010)
+
+`tests/test_realworld.py` replays problems seen when a small local model ran the harness on
+a real Next.js repository (github.com/nst-sdc/Open-Source-Tracker-NST, issue #76):
+
+- repo paths written with a leading `/`
+- regex-style searches treated as plain text
+- repeated dead-end searches
+- test log lines mistaken for failures
+- JavaScript test output that wasn't parsed
+
+Each one is fixed and covered by a test.

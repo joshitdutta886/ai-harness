@@ -74,7 +74,7 @@ class ToolTests(unittest.TestCase):
 
     def test_unknown_tool_and_bad_args(self):
         self.assertIn("unknown tool", T.execute(self.ws, "nope", {}))
-        self.assertIn("bad arguments", T.execute(self.ws, "read_file", {"wrong": 1}))
+        self.assertIn("has no argument(s) 'wrong'", T.execute(self.ws, "read_file", {"wrong": 1}))
 
 
 if __name__ == "__main__":

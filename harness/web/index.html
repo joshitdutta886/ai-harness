@@ -342,6 +342,17 @@ function render(e, live) {
         collapsible(li, "full output", out.split("\n[harness]")[0]);
       });
       break; }
+    case "autotest": {
+      setStage("test"); bump("tests", S.tests + 1);
+      const first = (e.output || "").split("\n").slice(2).join("\n");
+      addEv(e.ok ? "test" : "bad", (li) => { const r = el("div", "row");
+        r.append(el("span", "name", "\u{1F9EA} harness ran the tests after the edit"), el("span", "stepno", S.step ? "step " + S.step : ""));
+        li.appendChild(r); li.appendChild(el("div", "args", e.command || ""));
+        li.appendChild(el("div", "first " + (e.ok ? "ok" : "bad"), e.ok ? "PASSED" + (e.stopped ? " - the target test now passes; the harness runs its full check next" : "") : "FAILED"));
+        collapsible(li, "test output", e.output); });
+      break; }
+    case "thinking_on":
+      addEv("note", (li) => { li.textContent = "\u{1F9E0} full reasoning switched on (" + e.reason + ")"; }); break;
     case "compact":
       addEv("note", (li) => { li.textContent = "♻ context compacted: " + e.count + " old output(s) shortened to save tokens"; }); break;
     case "verify":

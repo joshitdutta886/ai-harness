@@ -15,6 +15,10 @@ class ScriptedLLM:
         self.script = list(script)
         self.seen = []
 
+    def enable_thinking(self):
+        self.thinking = True
+        return True
+
     def chat(self, system, messages, tools):
         self.seen.append([dict(m) for m in messages])
         if not self.script:
@@ -37,30 +41,68 @@ class AgentLoopTests(unittest.TestCase):
         llm = ScriptedLLM(script)
         return Agent(cfg, repo, llm=llm, ui=UI(quiet=True), **kw), llm
 
-    def test_resolves_with_verification_gate(self):
+    def test_tests_run_automatically_after_edit(self):
         agent, llm = self.make([
             ("search_code", {"query": "apply_discount"}),
             FIX,
-            ("finish", {"summary": "fixed"}),       # rejected: tests not run after edit
-            ("run_tests", {}),
             ("finish", {"summary": "percent was not divided by 100; tests pass"}),
         ])
         r = agent.run("Cart.total gives -1800 with 10% discount")
         self.assertEqual(r.status, "resolved", r)
         self.assertEqual(r.changed_files, ["shop/pricing.py"])
         self.assertIn("/ 100", r.diff)
-        # the rejection message reached the model
         flat = json.dumps(llm.seen[-1])
-        self.assertIn("finish rejected", flat)
+        self.assertIn("Tests after your edit: PASSED", flat)
+        self.assertNotIn("tests: not run", flat.split("Tests after your edit")[1])
         tel = r.telemetry
-        self.assertEqual(tel["finish_rejections"], ["tests_not_run"])
+        self.assertEqual(tel["finish_rejections"], [])
+        self.assertEqual(tel["auto_checks"], 1)
         self.assertEqual(tel["edits"], 1)
-        self.assertEqual(tel["test_passes"], 1)
-        self.assertEqual(tel["tools"]["search_code"]["calls"], 1)
+        self.assertEqual(len(llm.seen), 3)          # search, edit, finish: no separate run_tests call
         import os
         self.assertTrue(os.path.exists(os.path.join(r.run_dir, "telemetry.json")))
         with open(os.path.join(r.run_dir, "report.md")) as fh:
             self.assertIn("## Telemetry", fh.read())
+
+    def test_edit_and_finish_in_one_turn(self):
+        agent, _ = self.make([])
+        class OneShot:
+            def __init__(self): self.calls = 0
+            def chat(self, system, messages, tools):
+                self.calls += 1
+                return LLMResponse(text="Fix percent.", tool_calls=[
+                    ToolCall("a", FIX[0], FIX[1]), ToolCall("b", "finish", {"summary": "divide by 100"})])
+        agent.llm = OneShot()
+        r = agent.run("discount bug")
+        self.assertEqual(r.status, "resolved")
+        self.assertEqual(agent.llm.calls, 1)          # edit + finish together: one model call
+
+    def test_edit_and_finish_in_one_turn_rejected_if_tests_fail(self):
+        agent, _ = self.make([])
+        breaks = ("edit_file", {"path": "shop/cart.py", "old_str": "return sum(price * qty",
+                                "new_str": "return 1 + sum(price * qty"})
+        class OneShot:
+            def __init__(self): self.calls = 0
+            def chat(self, system, messages, tools):
+                self.calls += 1
+                if self.calls == 1:
+                    return LLMResponse(tool_calls=[ToolCall("a", breaks[0], breaks[1]),
+                                                   ToolCall("b", "finish", {"summary": "done"})])
+                return LLMResponse(tool_calls=[ToolCall("c%d" % self.calls, "revert_file", {"path": "shop/cart.py"})])
+        agent.llm = OneShot()
+        agent.cfg.max_steps = 2
+        r = agent.run("discount bug")
+        self.assertNotEqual(r.status, "resolved")
+        self.assertIn("tests_not_run", r.telemetry["finish_rejections"])
+
+    def test_finish_rejected_when_tests_fail_after_edit(self):
+        breaks = ("edit_file", {"path": "shop/cart.py", "old_str": "return sum(price * qty",
+                                "new_str": "return 1 + sum(price * qty"})
+        agent, llm = self.make([breaks, ("finish", {"summary": "done"}), FIX, ("finish", {"summary": "done"})])
+        r = agent.run("discount bug")
+        self.assertIn("Tests after your edit: FAILED", json.dumps(llm.seen[1]))
+        self.assertIn("tests_not_run", r.telemetry["finish_rejections"])
+        self.assertIn("thinking_enabled_at_step", r.telemetry)
 
     def test_overview_contains_issue_identifiers(self):
         agent, llm = self.make([FIX, ("run_tests", {}), ("finish", {"summary": "ok"})])
@@ -191,6 +233,45 @@ class WireFormatTests(unittest.TestCase):
         cfg.thinking = "off"
         L.LLMClient(cfg).chat("sys", [{"role": "user", "content": "x"}], [])
         self.assertTrue(sent[0].endswith("/no_think"))
+
+    def test_adaptive_thinking(self):
+        sent = []
+
+        def fake(url, headers, body, timeout):
+            sent.append((body["messages"][0]["content"].endswith("/no_think"), body.get("enable_thinking")))
+            return {"choices": [{"message": {"content": "OK"}}], "usage": {}}
+        L._post = fake
+        cfg = fake_config(tempfile.mkdtemp())
+        cfg.provider = "qwen"
+        c = L.LLMClient(cfg)
+        c.chat("sys", [{"role": "user", "content": "x"}], [])
+        self.assertTrue(c.enable_thinking())
+        c.chat("sys", [{"role": "user", "content": "x"}], [])
+        self.assertEqual(sent, [(True, False), (False, None)])
+        cfg2 = fake_config(tempfile.mkdtemp()); cfg2.thinking = "on"
+        self.assertFalse(L.LLMClient(cfg2).no_think)
+
+    def test_adapts_to_provider_output_limit(self):
+        import io
+        import urllib.error
+        sent = []
+
+        def fake(url, headers, body, timeout):
+            sent.append(body["max_tokens"])
+            if body["max_tokens"] > 1000:
+                raise urllib.error.HTTPError(url, 429, "limit", {}, io.BytesIO(
+                    b'{"error":{"message":"Request too large for model on output tokens per minute (OTPM): '
+                    b'Limit 1000, Requested 1028. reduce max_tokens","code":"rate_limit_exceeded"}}'))
+            return {"choices": [{"message": {"content": "OK"}, "finish_reason": "stop"}], "usage": {}}
+        L._post = fake
+        cfg = fake_config(tempfile.mkdtemp())
+        r = L.LLMClient(cfg).chat("sys", [{"role": "user", "content": "x"}], [])
+        self.assertEqual(r.text, "OK")
+        self.assertEqual(sent[0], 4096)
+        self.assertEqual(len(sent), 2)
+        self.assertLessEqual(sent[1], 1000)
+        c = L.LLMClient(cfg)                      # the "ran out of room" retry never exceeds the cap
+        self.assertLessEqual(c.max_tokens_cap, 16384)
 
     def test_anthropic_merges_tool_results(self):
         def fake(url, headers, body, timeout):

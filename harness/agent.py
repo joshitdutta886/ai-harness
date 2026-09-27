@@ -52,6 +52,7 @@ class Agent:
         self.finish_rejections = 0
         self.no_tool_streak = 0
         self.warned_wrap_up = False
+        self.failed_checks = 0
         self.telemetry = {
             "model_calls": 0, "model_seconds": 0.0, "tool_calls": 0, "tool_errors": 0,
             "tools": {},                 # name -> {"calls", "errors", "seconds"}
@@ -60,7 +61,7 @@ class Agent:
             "finish_rejections": [],     # reasons
             "nudges_no_tool": 0, "repeat_warnings": 0, "recovery_hints": 0,
             "text_mode_tool_calls": 0, "edits": 0, "test_runs": 0, "test_passes": 0,
-            "verifications": 0, "reverts": 0,
+            "verifications": 0, "reverts": 0, "auto_checks": 0,
         }
         stamp = time.strftime("%Y%m%d-%H%M%S")
         self.run_dir = run_dir or os.path.join(cfg.runs_dir, stamp)
@@ -187,11 +188,16 @@ class Agent:
             self.no_tool_streak = 0
 
             finish_call = None
+            edits_before = self.ws.edit_counter
             for tc in resp.tool_calls:
                 if tc.name == "finish":
                     finish_call = tc
                     continue
                 self._run_tool(tc)
+            if self.ws.edit_counter != edits_before and self._auto_check(resp.text):
+                if finish_call is not None:
+                    self._reply_to_finish(finish_call.id, "Finished.")
+                return   # fix verified by the harness: stop without spending another model call
             if finish_call is not None:
                 summary = str(finish_call.args.get("summary", "")) or resp.text
                 if self._try_finish(summary, finish_call.id):
@@ -225,7 +231,8 @@ class Agent:
             tel["test_runs"] += 1
             tel["test_passes"] += int(out.startswith("TESTS PASSED"))
         repeats = self.call_counts[sig]
-        if repeats >= 3 and tc.name not in ("run_tests", "git_diff"):
+        dead_end = out.startswith("No matches") or out.startswith("Error")
+        if (repeats >= 3 or (repeats >= 2 and dead_end)) and tc.name not in ("run_tests", "git_diff"):
             out += P.REPEAT_WARNING.format(n=repeats)
             tel["repeat_warnings"] += 1
         if self.error_streak >= 3:
@@ -237,17 +244,77 @@ class Agent:
         self.log("tool", name=tc.name, args=tc.args, seconds=round(dt, 2), output=out[:4000])
         self.messages.append({"role": "tool", "tool_call_id": tc.id, "name": tc.name, "content": out})
 
+    def _auto_check(self, model_text: str) -> bool:
+        """Run the tests after an edit and attach the result to the edit's tool reply.
+
+        Saves the model a run_tests call. If the target test (or a red baseline suite)
+        has gone from failing to passing, run the full verification and, when it holds,
+        end the run as resolved - no further model calls needed.
+        Returns True when the run is finished.
+        """
+        ws = self.ws
+        cmd = ws.target_test_command or ws.detect_test_command()
+        if not cmd:
+            return False
+        timeout = int(min(self.cfg.command_timeout, max(60, ws.baseline_seconds * 3 + 30)))
+        self.ui.phase("Auto-check after edit: " + cmd)
+        out = T.run_tests(ws, cmd, timeout)
+        passed = out.startswith("TESTS PASSED")
+        tel = self.telemetry
+        tel["auto_checks"] = tel.get("auto_checks", 0) + 1
+        tel["test_runs"] += 1
+        tel["test_passes"] += int(passed)
+        body = out.split("\n", 2)[-1] if out.count("\n") >= 2 else out
+        note = P.AUTO_TEST_PASS.format(cmd=cmd) if passed else P.AUTO_TEST_FAIL.format(
+            cmd=cmd, tail=C._tail(body, 900))
+        target_fixed = bool(ws.target_test_command and ws.target_baseline is not None
+                            and not ws.target_baseline.passed and passed)
+        suite_fixed = bool(not ws.target_test_command and ws.baseline is not None
+                           and not ws.baseline.passed and passed)
+        done = False
+        self.log("autotest", ok=passed, command=cmd, output=out[:2000], stopped=target_fixed or suite_fixed)
+        if target_fixed or suite_fixed:
+            verdict = self._verify()
+            if verdict is not None and verdict.ok:
+                self.result.status = "resolved"
+                self.result.summary = ((model_text or "").strip() + " " if model_text else "") + \
+                    "[auto-verified by the harness: %s]" % verdict.reason
+                done = True
+            elif verdict is not None:
+                note += P.AUTO_VERIFY_FAIL.format(verdict=verdict.describe())
+        if not passed:
+            self.failed_checks += 1
+            if self.failed_checks >= 2:
+                self._escalate("two failed test runs after edits")
+        for m in reversed(self.messages):
+            if m["role"] == "tool":
+                body = m["content"]
+                if "\n[harness %d/" % self.result.steps in body:      # replace the now-stale status line
+                    body = body.rsplit("\n[harness %d/" % self.result.steps, 1)[0]
+                m["content"] = body + note + ("" if done else self._status_line())
+                break
+        self.ui.info(note.strip().splitlines()[0])
+        return done
+
+    def _escalate(self, why: str) -> None:
+        """Adaptive thinking: turn full reasoning on once the model is struggling."""
+        fn = getattr(self.llm, "enable_thinking", None)
+        if fn and fn():
+            self.telemetry["thinking_enabled_at_step"] = self.result.steps
+            self.log("thinking_on", reason=why)
+            self.ui.info("thinking enabled (%s)" % why)
+
     def _status_line(self) -> str:
         changed = self.ws.changed_files()
         if self.ws.last_test_passed is None:
-            tests = "not run yet"
+            tests = "not run"
         elif self.ws.last_test_passed and self.ws.last_test_edit_counter == self.ws.edit_counter:
-            tests = "PASSED (up to date)"
+            tests = "passed"
         elif self.ws.last_test_passed:
-            tests = "passed before your latest edit - re-run"
+            tests = "passed before your last edit"
         else:
-            tests = "FAILED"
-        return "\n[harness] step %d/%d | changed: %s | tests: %s" % (
+            tests = "failed"
+        return "\n[harness %d/%d] changed: %s; tests: %s" % (
             self.result.steps, self.cfg.max_steps, ", ".join(changed) or "none", tests)
 
     def _add_user(self, text: str) -> None:
@@ -295,6 +362,7 @@ class Agent:
                 self.finish_rejections += 1
                 self.ui.info("finish rejected: tests not run after last edit")
                 self.telemetry["finish_rejections"].append("tests_not_run")
+                self._escalate("finish rejected: tests failing")
                 self._reply_to_finish(call_id, P.FINISH_NO_TESTS)
                 return False
             # Independent verification by the harness ("evidence over claims").
@@ -303,6 +371,7 @@ class Agent:
                 self.finish_rejections += 1
                 self.ui.info("finish rejected: harness verification failed")
                 self.telemetry["finish_rejections"].append("verification_failed")
+                self._escalate("finish rejected by verification")
                 failing = verdict.target if (verdict.target and not verdict.target.passed) else verdict.suite
                 detail = T.truncate(failing.output, 3000) if failing else ""
                 self._reply_to_finish(call_id, P.FINISH_VERIFY_FAILED.format(
@@ -348,7 +417,7 @@ class Agent:
             "| Model calls | %d (%.1fs waiting on the model) |" % (self.telemetry["model_calls"], self.telemetry["model_seconds"]),
             "| Tool calls | %d (%d returned an error to the model) |" % (self.telemetry["tool_calls"], self.telemetry["tool_errors"]),
             "| Edits | %d (reverts: %d) |" % (self.telemetry["edits"], self.telemetry["reverts"]),
-            "| Harness verifications | %d |" % self.telemetry["verifications"],
+            "| Harness verifications | %d (auto-checks after edits: %d) |" % (self.telemetry["verifications"], self.telemetry["auto_checks"]),
             "| Test runs | %d (%d passed) |" % (self.telemetry["test_runs"], self.telemetry["test_passes"]),
             "| Finish rejections | %s |" % (", ".join(self.telemetry["finish_rejections"]) or "none"),
             "| Context compactions | %d (%d chars saved) |" % (self.telemetry["compactions"], self.telemetry["chars_saved_by_compaction"]),

@@ -83,11 +83,15 @@ class VerificationLoopTests(unittest.TestCase):
         breaks_mean = ("edit_file", {"path": "numkit/stats.py", "old_str": "return sum(values) / len(values)",
                                      "new_str": "return sum(values) // len(values)"})
         target = "python3 -m unittest tests.test_stats.MedianTests.test_even_length"
-        r, llm = self.run_agent(repo, [fix, breaks_mean, ("run_tests", {}), ("finish", {"summary": "done"})],
-                                test_cmd=target)
+        # break mean() first, then fix median(): the target test passes, but the harness's
+        # regression check must catch the new failure and refuse to stop or finish.
+        r, llm = self.run_agent(repo, [breaks_mean, fix, ("finish", {"summary": "done"})], test_cmd=target)
+        after_fix = json.dumps(llm.seen[2])
+        self.assertIn("full check found a problem", after_fix)
+        self.assertIn("NEW failures", after_fix)
+        self.assertIn("test_mean", after_fix)
         self.assertIn("verification_failed", r.telemetry["finish_rejections"])
-        self.assertIn("NEW failures", json.dumps(llm.seen[-1]))
-        self.assertIn("test_mean", json.dumps(llm.seen[-1]))
+        self.assertNotEqual(r.status, "resolved")
 
     def test_target_test_resolves_and_is_shown_failing_first(self):
         repo = task_copy("median")
@@ -98,6 +102,8 @@ class VerificationLoopTests(unittest.TestCase):
         self.assertEqual(r.status, "resolved", r.verification)
         self.assertIn("FAILS right now", llm.seen[0][0]["content"])
         self.assertIn("target test", r.verification)
+        self.assertEqual(len(llm.seen), 1)   # verified straight after the edit: no more model calls
+        self.assertIn("auto-verified", r.summary)
 
     def test_time_limit(self):
         repo = task_copy("median")

@@ -47,7 +47,11 @@ RETRY_STATUS = {408, 409, 425, 429, 500, 502, 503, 504, 529}
 
 
 def _post(url: str, headers: Dict[str, str], body: dict, timeout: int) -> dict:
+    from .config import USER_AGENT
     data = json.dumps(body).encode("utf-8")
+    headers = dict(headers)
+    headers.setdefault("user-agent", USER_AGENT)
+    headers.setdefault("accept", "application/json")
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
@@ -63,8 +67,14 @@ class LLMClient:
         self._send_reasoning = False
         self._model_switched = False
         self._length_retries = 0
+        self.max_tokens_cap = 16384      # lowered if the provider reports an output-token limit
         self.wasted_tokens = 0
-        self.no_think = (cfg.thinking or "auto").lower() in ("off", "false", "0", "no")
+        # thinking: "auto" = adaptive (start off; the agent turns it on when the model struggles),
+        # "off" = always off, "on" = never ask the model to skip thinking.
+        mode = (cfg.thinking or "auto").lower()
+        self.thinking_mode = "on" if mode in ("on", "true", "1", "yes") else ("off" if mode in ("off", "false", "0", "no") else "auto")
+        self.no_think = self.thinking_mode != "on"
+        self._send_enable_thinking = True
         mode = (cfg.tool_mode or "auto").lower()
         self.text_mode = mode == "text"
         self._allow_mode_switch = mode == "auto" and not self.is_anthropic
@@ -83,9 +93,9 @@ class LLMClient:
                 # return nothing usable. Give them more room and ask again (twice max).
                 if (not resp.text and not resp.tool_calls
                         and resp.stop_reason in ("length", "max_tokens")
-                        and self.cfg.max_output_tokens < 16384 and self._length_retries < 2):
+                        and self.cfg.max_output_tokens < self.max_tokens_cap and self._length_retries < 2):
                     self._length_retries += 1
-                    self.cfg.max_output_tokens = min(16384, self.cfg.max_output_tokens * 2)
+                    self.cfg.max_output_tokens = min(self.max_tokens_cap, self.cfg.max_output_tokens * 2)
                     print("   [harness] model ran out of output tokens while thinking; "
                           "retrying with max_tokens=%d" % self.cfg.max_output_tokens, flush=True)
                     self.wasted_tokens += resp.input_tokens + resp.output_tokens
@@ -98,6 +108,8 @@ class LLMClient:
                     detail = e.read().decode("utf-8", "replace")[:800]
                 except Exception:
                     pass
+                if e.code in (400, 413, 429) and self._fit_output_limit(detail):
+                    continue  # provider caps output tokens (e.g. free tiers): ask for less and retry
                 if e.code == 400 and not self.is_anthropic and self._adapt(detail):
                     continue  # retry immediately with adjusted params
                 if e.code in (400, 404) and self._switch_model(detail):
@@ -111,6 +123,31 @@ class LLMClient:
                     self._sleep(attempt, e)
                     continue
                 raise LLMError("Network error talking to %s: %s" % (self.cfg.provider, e))
+
+    def _fit_output_limit(self, detail: str) -> bool:
+        """Provider says our max_tokens is above its output limit (e.g. Groq free tier:
+        'output tokens per minute (OTPM): Limit 1000, Requested 1028'). Lower it and retry."""
+        d = (detail or "").lower()
+        if not any(k in d for k in ("output tokens", "max_tokens", "max_completion_tokens", "otpm")):
+            return False
+        m = re.search(r"limit[^0-9]{0,20}(\d+)", d)
+        if not m:
+            return False
+        limit = int(m.group(1))
+        new = max(128, int(limit * 0.8))
+        if new >= self.cfg.max_output_tokens:
+            return False
+        self.cfg.max_output_tokens = new
+        self.max_tokens_cap = new
+        print("   [harness] provider limits output to %d tokens; using max_tokens=%d" % (limit, new), flush=True)
+        return True
+
+    def enable_thinking(self) -> bool:
+        """Let the model think fully from now on (adaptive mode). Returns True if it changed."""
+        if self.thinking_mode == "auto" and self.no_think:
+            self.no_think = False
+            return True
+        return False
 
     # ----------------------------------------------------------------- helpers
     def _switch_model(self, detail: str) -> bool:
@@ -156,6 +193,9 @@ class LLMClient:
             changed = True
         if "temperature" in d and self._send_temperature:
             self._send_temperature = False
+            changed = True
+        if "enable_thinking" in d and self._send_enable_thinking:
+            self._send_enable_thinking = False
             changed = True
         if "reasoning_content" in d and not self._send_reasoning:
             self._send_reasoning = True
@@ -283,6 +323,8 @@ class LLMClient:
             body["temperature"] = self.cfg.temperature
         if self.no_think and self.cfg.provider == "ollama":
             body["think"] = False          # Ollama's switch for hybrid reasoning models
+        if self.no_think and self.cfg.provider in ("qwen", "qwen-cn") and self._send_enable_thinking:
+            body["enable_thinking"] = False  # DashScope's switch for Qwen3-style hybrid models
         headers = {"content-type": "application/json", "authorization": "Bearer " + self.cfg.api_key}
         data = _post(self.cfg.base_url + "/chat/completions", headers, body, self.cfg.request_timeout)
         choices = data.get("choices") or []
